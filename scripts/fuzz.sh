@@ -61,7 +61,7 @@ for binary in "$FUZZ_DIR"/*; do
     if [ -d "$crash_dir" ]; then
         for crash_file in "$crash_dir"/id:*; do
             [ -f "$crash_file" ] || continue
-            crash_name=$(basename "$crash_file")
+            crash_name=$(basename "$crash_file" | tr ':,' '__')
             result_file="$FUZZ_RESULTS_DIR/${bname}_fuzz_${crash_name}.txt"
 
             set +e
@@ -74,6 +74,7 @@ for binary in "$FUZZ_DIR"/*; do
                 echo "  [!] NEW CRASH: $bname from fuzzing"
                 # Also save the crashing input
                 cp "$crash_file" "$FUZZ_RESULTS_DIR/${bname}_fuzz_${crash_name}.bin"
+                echo "$crash_name" > "$FUZZ_RESULTS_DIR/${bname}_fuzz_${crash_name}.bin.orig_name"
                 new_crashes=$((new_crashes + 1))
             else
                 rm -f "$result_file"
@@ -86,7 +87,7 @@ for binary in "$FUZZ_DIR"/*; do
     if [ -d "$hang_dir" ]; then
         for hang_file in "$hang_dir"/id:*; do
             [ -f "$hang_file" ] || continue
-            hang_name=$(basename "$hang_file")
+            hang_name=$(basename "$hang_file" | tr ':,' '__')
             cp "$hang_file" "$FUZZ_RESULTS_DIR/${bname}_hang_${hang_name}.bin"
             echo "  [!] HANG: $bname from fuzzing"
         done

@@ -112,7 +112,8 @@ def main():
 
     for hang in hangs:
         if Path(hang["path"]).exists():
-            shutil.copy2(hang["path"], hangs_dir / hang["file"])
+            safe_name = hang["file"].replace(":", "_").replace(",", "_")
+            shutil.copy2(hang["path"], hangs_dir / safe_name)
 
     report = {
         "project": project,
