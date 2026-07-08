@@ -95,7 +95,7 @@ jobs:
               -I /tmp/src/fuzzing-headers/include/ \
               -I /tmp/src/wolfssl/ \
               -I /tmp/src/wolfmqtt/ \
-              /tmp/src/wolfmqtt-fuzzers/fuzzer.cpp \
+              /tmp/src/fuzzer.cpp \
               /tmp/src/wolfmqtt/src/.libs/libwolfmqtt.a \
               /tmp/src/wolfssl/src/.libs/libwolfssl.a \
               $LIB_FUZZING_ENGINE \

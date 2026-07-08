@@ -30,6 +30,19 @@ jobs:
       - name: Install AFL++ and dependencies
         run: |
           bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            cmake \
+            libbrotli-dev \
+            libtool \
+            mercurial \
+            meson \
+            nasm \
+            ninja-build \
+            pkg-config \
+            yasm \
+            zlib1g-dev
 
       - name: Clone source
         run: |

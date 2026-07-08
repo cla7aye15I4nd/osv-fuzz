@@ -32,6 +32,7 @@ jobs:
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
             autoconf \
+            cmake \
             libgif-dev \
             libjpeg-dev \
             libpng-dev \

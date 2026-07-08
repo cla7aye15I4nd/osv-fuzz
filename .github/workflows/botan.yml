@@ -51,7 +51,7 @@ jobs:
           export CC=afl-cc
           export CXX=afl-c++
           export CFLAGS="${CFLAGS:-} -fsanitize=address"
-          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address -fsanitize=fuzzer"
           export FUZZING_ENGINE=afl
           export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
           export SANITIZER=address
@@ -65,9 +65,12 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+          # Create empty libFuzzingEngine.a — botan's config_for_oss_fuzz.py
+          # hardcodes --with-fuzzer-lib=FuzzingEngine; the actual main is
+          # provided by afl-c++ via -fsanitize=fuzzer in CXXFLAGS.
+          ar rcs /usr/local/lib/libFuzzingEngine.a
           cd /tmp/src/botan
           set +e
-          cd /tmp/src/botan
           ln -s /tmp/src/fuzzer_corpus .
           ./src/scripts/config_for_oss_fuzz.py $CXX "$CXXFLAGS"
           make -j$(nproc) libs fuzzers

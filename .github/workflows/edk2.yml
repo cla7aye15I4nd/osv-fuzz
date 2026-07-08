@@ -37,7 +37,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/tianocore/edk2.git /tmp/src/--recursive
+          git clone --depth 1 --recursive https://github.com/tianocore/edk2.git /tmp/src/edk2
           git clone --depth 1 --recursive https://github.com/intel/hbfa-fl /tmp/src/hbfa-fl
 
       - name: Build fuzz targets with AFL++

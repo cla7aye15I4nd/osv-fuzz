@@ -34,9 +34,11 @@ jobs:
             autoconf \
             automake \
             libbsd-dev \
+            libexpat1-dev \
             libtool \
             libtool-bin \
             pkg-config \
+            subversion \
             uuid-dev
 
       - name: Clone source
@@ -45,6 +47,13 @@ jobs:
           git clone --depth 1 --recursive https://github.com/PCRE2Project/pcre2 /tmp/src/pcre2
           git clone --depth 1 --recursive https://github.com/AdaLogics/fuzz-headers /tmp/src/fuzz-headers
           git clone --depth 1 --recursive https://github.com/apache/httpd /tmp/src/httpd
+
+      - name: Build pcre2
+        run: |
+          cd /tmp/src/pcre2
+          ./autogen.sh
+          ./configure
+          make -j$(nproc)
 
       - name: Download fuzzer files from oss-fuzz
         run: |
@@ -84,7 +93,7 @@ jobs:
           ./buildconf
           ./configure --with-included-apr --enable-pool-debug
           make -j$( nproc )
-          static_pcre=($(find /src/pcre2 -name "libpcre2-8.a"))
+          static_pcre=($(find /tmp/src/pcre2 -name "libpcre2-8.a"))
           for fuzzname in utils parse tokenize addr_parse uri request preq; do
             $CC $CFLAGS -c \
               -I/tmp/src/fuzz-headers/lang/c -I./include -I./os/unix \

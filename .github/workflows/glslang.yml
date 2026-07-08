@@ -85,8 +85,8 @@ jobs:
           make V=1 -j$(nproc) install
           $CXX $CXXFLAGS $LIB_FUZZING_ENGINE /tmp/src/compile_fuzzer.cc \
           	-DENABLE_HLSL -DENABLE_OPT=0 -DGLSLANG_OSINCLUDE_UNIX \
-          	-I/src/glslang/glslang/Include/ -I/src/glslang/glslang/.. \
-          	-I/src/glslang/build/include -I/src/glslang/SPIRV/.. \
+          	-I/tmp/src/glslang/glslang/Include/ -I/tmp/src/glslang/glslang/.. \
+          	-I/tmp/src/glslang/build/include -I/tmp/src/glslang/SPIRV/.. \
           	./glslang/libglslang.a ./SPIRV/libSPIRV.a \
           	./glslang/libglslang-default-resource-limits.a \
           	-lpthread ./glslang/libMachineIndependent.a \

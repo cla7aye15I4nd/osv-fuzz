@@ -35,10 +35,13 @@ jobs:
             automake \
             bison \
             flex \
+            libglib2.0-dev \
             libtool \
             nasm \
+            ninja-build \
             patchelf \
             pkg-config
+          pip3 install meson
 
       - name: Clone source
         run: |

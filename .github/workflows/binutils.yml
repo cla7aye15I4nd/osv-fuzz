@@ -41,7 +41,7 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/DavidKorczynski/binary-samples /tmp/src/binary-samples
-          git clone --depth 1 --recursive git://sourceware.org/git/binutils-gdb.git /tmp/src/binutils-gdb
+          git clone --depth 1 --recursive https://sourceware.org/git/binutils-gdb.git /tmp/src/binutils-gdb
 
       - name: Download fuzzer files from oss-fuzz
         run: |

@@ -35,6 +35,7 @@ jobs:
             flex \
             pkg-config \
             python3-dev
+          cargo install bindgen-cli
 
       - name: Clone source
         run: |

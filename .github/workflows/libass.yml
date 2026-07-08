@@ -37,6 +37,8 @@ jobs:
             libfreetype-dev \
             libfribidi-dev \
             libtool \
+            meson \
+            ninja-build \
             pkg-config
 
       - name: Clone source
@@ -84,11 +86,11 @@ jobs:
           meson --default-library=static --wrap-mode=nodownload \
                 -Dfuzzer_ldflags="$(echo $LIB_FUZZING_ENGINE)" \
                 -Dtests=disabled \
-                --prefix=/work/ --libdir=lib $build \
-            || (cat build/meson-logs/meson-log.txt && false)
+                --prefix=/tmp/work --libdir=lib $build \
+            || (cat $build/meson-logs/meson-log.txt && false)
           meson install -C $build
           cd /tmp/src/libass
-          export PKG_CONFIG_PATH=/work/lib/pkgconfig
+          export PKG_CONFIG_PATH=/tmp/work/lib/pkgconfig
           ./autogen.sh
           ./configure \
             FUZZ_CPPFLAGS="-DASS_FUZZMODE=2 -DASSFUZZ_MAX_LEN=8192" \

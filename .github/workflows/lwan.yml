@@ -33,7 +33,8 @@ jobs:
           sudo apt-get install -y -qq \
             cmake \
             ninja-build \
-            zlib1g-dev
+            zlib1g-dev \
+            libzstd-dev
 
       - name: Clone source
         run: |
@@ -80,7 +81,7 @@ jobs:
           	$CXX $CXXFLAGS -std=c++11 \
           		-Wl,-whole-archive /tmp/work/lwan/src/lib/liblwan.a -Wl,-no-whole-archive \
           		-I/tmp/src/lwan/src/lib $fuzzer \
-          		$LIB_FUZZING_ENGINE -lpthread -lz \
+          		$LIB_FUZZING_ENGINE -lpthread -lz -lzstd \
           		-o $GITHUB_WORKSPACE/build/fuzz-targets/$executable
           done
           set -e

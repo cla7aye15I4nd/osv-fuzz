@@ -30,6 +30,11 @@ jobs:
       - name: Install AFL++ and dependencies
         run: |
           bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            automake \
+            libssl-dev \
+            libtool \
+            zlib1g-dev
 
       - name: Clone source
         run: |
@@ -58,7 +63,7 @@ jobs:
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/libssh2
           set +e
-          apt-get update
+          sudo apt-get update
           ./tests/ossfuzz/ossfuzz.sh
           set -e
           # Verify at least one fuzz target was built

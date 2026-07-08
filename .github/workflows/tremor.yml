@@ -87,13 +87,13 @@ jobs:
           make install
           popd
           $CXX $CXXFLAGS -I"/tmp/work/include" -L"/tmp/work/lib" \
-              /src/tremor/decode_fuzzer.cc -o $GITHUB_WORKSPACE/build/fuzz-targets/decode_fuzzer \
+              /tmp/src/decode_fuzzer.cc -o $GITHUB_WORKSPACE/build/fuzz-targets/decode_fuzzer \
               $LIB_FUZZING_ENGINE -lvorbisidec -logg
           $CXX $CXXFLAGS -I"/tmp/work/include" -L"/tmp/work/lib" \
-              /src/tremor/vorbis_synthesis_fuzzer.cc -o $GITHUB_WORKSPACE/build/fuzz-targets/vorbis_synthesis_fuzzer \
+              /tmp/src/vorbis_synthesis_fuzzer.cc -o $GITHUB_WORKSPACE/build/fuzz-targets/vorbis_synthesis_fuzzer \
               $LIB_FUZZING_ENGINE -lvorbisidec -logg
           $CXX $CXXFLAGS -I"/tmp/work/include" -L"/tmp/work/lib" \
-              /src/tremor/ogg_fuzzer.cc -o $GITHUB_WORKSPACE/build/fuzz-targets/ogg_fuzzer \
+              /tmp/src/ogg_fuzzer.cc -o $GITHUB_WORKSPACE/build/fuzz-targets/ogg_fuzzer \
               $LIB_FUZZING_ENGINE -logg
           set -e
           # Verify at least one fuzz target was built

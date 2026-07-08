@@ -31,7 +31,8 @@ jobs:
         run: |
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
-            cmake
+            cmake \
+            ninja-build
 
       - name: Clone source
         run: |
@@ -62,6 +63,9 @@ jobs:
           set +e
           export CFLAGS="$CFLAGS -Wno-error=nan-infinity-disabled"
           export CXXFLAGS="$CXXFLAGS -Wno-error=nan-infinity-disabled"
+          # Create apt-get shim so oss-fuzz.sh's bare apt-get calls use sudo
+          printf '#!/bin/sh\nexec sudo /usr/bin/apt-get "$@"\n' > /usr/local/bin/apt-get
+          chmod +x /usr/local/bin/apt-get
           /tmp/src/librawspeed/.ci/oss-fuzz.sh
           set -e
           # Verify at least one fuzz target was built

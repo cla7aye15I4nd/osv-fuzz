@@ -35,6 +35,7 @@ jobs:
             automake \
             libbluetooth-dev \
             libdbus-1-dev \
+            libglib2.0-dev \
             libical-dev \
             libreadline-dev \
             libreadline8 \
@@ -50,7 +51,6 @@ jobs:
           mkdir -p /tmp/src
           git clone --depth 1 --recursive git://git.kernel.org/pub/scm/libs/ell/ell.git /tmp/src/ell
           git clone --depth 1 --recursive https://github.com/bluez/bluez /tmp/src/bluez
-          git clone --depth 1 --recursive https://github.com/GNOME/glib /tmp/src/glib
 
       - name: Download fuzzer files from oss-fuzz
         run: |
@@ -90,8 +90,8 @@ jobs:
           autoreconf -f
           ./configure --disable-systemd
           make -j$(nproc)
-          INCLUDES="-I. -I./src -I./lib -I./gobex -I/usr/local/include/glib-2.0/ -I/src/glib/_build/glib/ -I/usr/include/bluetooth"
-          STATIC_LIBS="./src/.libs/libshared-glib.a ./lib/.libs/libbluetooth-internal.a  -l:libical.a -l:libicalss.a -l:libicalvcal.a -l:libdbus-1.a /src/glib/_build/glib/libglib-2.0.a"
+          INCLUDES="-I. -I./src -I./lib -I./gobex $(pkg-config --cflags glib-2.0) -I/usr/include/bluetooth"
+          STATIC_LIBS="./src/.libs/libshared-glib.a ./lib/.libs/libbluetooth-internal.a  -l:libical.a -l:libicalss.a -l:libicalvcal.a -l:libdbus-1.a $(pkg-config --libs glib-2.0)"
           $CC $CFLAGS $INCLUDES /tmp/src/fuzz_xml.c -c
           $CC $CFLAGS $INCLUDES /tmp/src/fuzz_sdp.c -c
           $CC $CFLAGS $INCLUDES /tmp/src/fuzz_textfile.c -c

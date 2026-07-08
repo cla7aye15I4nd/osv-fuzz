@@ -32,7 +32,9 @@ jobs:
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
             autoconf \
+            automake \
             libssl-dev \
+            libtool \
             pkg-config \
             sudo
 

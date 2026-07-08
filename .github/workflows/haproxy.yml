@@ -37,8 +37,8 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/haproxy/haproxy /tmp/src/haproxy
-          git clone --depth 1 --recursive https://code.vinyl-cache.org/vtest/VTest2 /tmp/src/VTest2
+          git clone --recursive https://github.com/haproxy/haproxy /tmp/src/haproxy
+          git clone --recursive https://code.vinyl-cache.org/vtest/VTest2 /tmp/src/VTest2
 
       - name: Download fuzzer files from oss-fuzz
         run: |
@@ -79,7 +79,7 @@ jobs:
           sed 's/COPTS += $(DEBUG) $(OPTIONS_CFLAGS) $(CFLAGS) $(ADDINC)/COPTS += $(DEBUG) $(OPTIONS_CFLAGS) $(CFLAGS) $(ADDINC) ${ORIG_CFLAGS}/g' -i Makefile
           sed 's/LDOPTS = $(TARGET_LDFLAGS) $(OPTIONS_LDFLAGS) $(ADDLIB)/LDOPTS = $(TARGET_LDFLAGS) $(OPTIONS_LDFLAGS) $(ADDLIB) ${CXXFLAGS}/g' -i Makefile
           make TARGET=generic CC=${CC} LD=${CXX} 
-          cd /src/haproxy
+          cd /tmp/src/haproxy
           sed 's/int main(int argc/int main2(int argc/g' -i ./src/haproxy.c
           sed 's/dladdr(main,/dladdr(main2,/g' -i ./src/tools.c
           sed 's/(void*)main/(void*)main2/g' -i ./src/tools.c

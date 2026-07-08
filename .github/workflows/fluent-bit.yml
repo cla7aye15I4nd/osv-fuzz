@@ -151,6 +151,7 @@ jobs:
           cmake -DFLB_TESTS_INTERNAL=ON \
                 -DFLB_TESTS_INTERNAL_FUZZ=ON \
                 -DFLB_TESTS_OSSFUZZ=ON \
+                -DFLB_UNICODE_ENCODER=OFF \
                 ${EXTRA_FLAGS} \
                 ${INPUT_PLUGINS} \
                 ${FILTER_PLUGINS} \

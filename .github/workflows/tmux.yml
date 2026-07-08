@@ -34,6 +34,7 @@ jobs:
             autoconf \
             automake \
             bison \
+            cmake \
             libtool \
             ncurses-dev \
             pkg-config
@@ -67,7 +68,19 @@ jobs:
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/tmux
           set +e
-          export PKG_CONFIG_PATH="/usr/local/lib/"
+          # Build libevent from source
+          pushd /tmp/src/libevent
+          mkdir -p build && cd build
+          cmake .. -DCMAKE_C_COMPILER=$CC -DCMAKE_C_FLAGS="$CFLAGS" \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DEVENT__DISABLE_OPENSSL=ON -DEVENT__DISABLE_BENCHMARK=ON \
+            -DEVENT__DISABLE_TESTS=ON -DEVENT__DISABLE_SAMPLES=ON \
+            -DEVENT__LIBRARY_TYPE=STATIC
+          make -j"$(nproc)"
+          make install
+          sudo ldconfig
+          popd
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig"
           ./autogen.sh
           ./configure \
               --enable-fuzzing \

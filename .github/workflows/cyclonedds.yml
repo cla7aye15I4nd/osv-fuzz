@@ -30,6 +30,14 @@ jobs:
       - name: Install AFL++ and dependencies
         run: |
           bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            bison \
+            libbison-dev \
+            libcunit1 \
+            libcunit1-dev \
+            libssl-dev
 
       - name: Clone source
         run: |

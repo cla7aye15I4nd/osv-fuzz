@@ -33,6 +33,11 @@ jobs:
           sudo apt-get install -y -qq \
             binutils
 
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 --recursive https://github.com/nlohmann/json.git /tmp/src/json
+
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src

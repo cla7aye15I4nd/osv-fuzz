@@ -79,7 +79,7 @@ jobs:
                 -DUSE_HTTPS=OFF \
                 -DUSE_AUTH_NTLM=OFF \
                 -DUSE_SSH=OFF \
-                -DUSE_BUNDLED_ZLIB=ON \
+                -DUSE_BUNDLED_ZLIB=ON
           make -j$(nproc)
           make install
           $CC $CFLAGS -c \

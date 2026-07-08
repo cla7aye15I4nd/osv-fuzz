@@ -91,11 +91,11 @@ jobs:
           cmake --build . --verbose --config Release -j$(nproc)
           cd /tmp/src/hdf5
           $CC $CFLAGS  -std=c99 -c \
-            -I/src/hdf5/src -I/src/hdf5/build-dir/src -I./src/H5FDsubfiling/ \
+            -I/tmp/src/hdf5/src -I/tmp/src/hdf5/build-dir/src -I./src/H5FDsubfiling/ \
             /tmp/src/h5_read_fuzzer.c
           $CXX $CXXFLAGS $LIB_FUZZING_ENGINE h5_read_fuzzer.o ./build-dir/bin/libhdf5.a -lz -o $GITHUB_WORKSPACE/build/fuzz-targets/h5_read_fuzzer
           $CC $CFLAGS  -std=c99 -c \
-            -I/src/hdf5/src -I/src/hdf5/build-dir/src -I./src/H5FDsubfiling/ \
+            -I/tmp/src/hdf5/src -I/tmp/src/hdf5/build-dir/src -I./src/H5FDsubfiling/ \
             /tmp/src/h5_extended_fuzzer.c
           $CXX $CXXFLAGS $LIB_FUZZING_ENGINE h5_extended_fuzzer.o ./build-dir/bin/libhdf5.a -lz -o $GITHUB_WORKSPACE/build/fuzz-targets/h5_extended_fuzzer
           zip -j $GITHUB_WORKSPACE/build/fuzz-targets/h5_extended_fuzzer_seed_corpus.zip /tmp/src/hdf5/test/testfiles/*.h5

@@ -33,6 +33,8 @@ jobs:
           sudo apt-get install -y -qq \
             libncurses5-dev \
             libssl-dev \
+            meson \
+            ninja-build \
             pkg-config
 
       - name: Clone source

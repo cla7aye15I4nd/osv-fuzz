@@ -37,6 +37,7 @@ jobs:
             liblzo2-dev \
             libnl-3-dev \
             libnl-genl-3-dev \
+            libnsl-dev \
             libpam-dev \
             libssl-dev \
             libtool \

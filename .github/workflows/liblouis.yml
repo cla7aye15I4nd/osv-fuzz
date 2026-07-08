@@ -65,6 +65,10 @@ jobs:
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/liblouis
           set +e
+          # Fix Apple-specific std::__fs::filesystem to portable std::filesystem
+          sed -i 's/std::__fs::filesystem/std::filesystem/g' /tmp/src/liblouis/tests/fuzzing/table_fuzzer.cc
+          # std::filesystem requires C++17
+          export CXXFLAGS="$CXXFLAGS -std=c++17"
           /tmp/src/liblouis/tests/fuzzing/build.sh
           set -e
           # Verify at least one fuzz target was built

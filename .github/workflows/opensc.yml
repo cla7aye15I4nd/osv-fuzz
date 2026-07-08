@@ -78,7 +78,7 @@ jobs:
           autoreconf --verbose --install
           ./configure --enable-static --disable-shared --prefix=/usr
           make
-          make install
+          sudo make install
           popd
           sed -i '/^#ifdef OPENSC_CONFIG_STRING/i #define OPENSC_CONFIG_STRING "app default { card_drivers = old, internal; }"' src/libopensc/ctx.c
           ./bootstrap

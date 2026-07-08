@@ -72,6 +72,9 @@ jobs:
           cd /tmp/src/openexr
           set +e
           set -x
+          # Create symlink for afl-compiler-rt.o (openexr cmake hardcodes oss-fuzz Docker path)
+          sudo mkdir -p /src/aflplusplus
+          sudo ln -sf "$(find /usr -name 'afl-compiler-rt.o' 2>/dev/null | head -1)" /src/aflplusplus/afl-compiler-rt.o
           export BUILD_DIR=/tmp/work/_build.oss-fuzz
           ./src/test/oss-fuzz/oss-fuzz_build.sh
           cd $BUILD_DIR
