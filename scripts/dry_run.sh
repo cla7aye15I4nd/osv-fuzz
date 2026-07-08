@@ -17,7 +17,7 @@ for binary in "$FUZZ_DIR"/*; do
     bname=$(basename "$binary")
     # Skip non-fuzz-target files
     case "$bname" in
-        *.dict|*.options|*.labels|*.cfg|*.txt|*.sh|*.py) continue ;;
+        *.dict|*.options|*.labels|*.cfg|*.txt|*.sh|*.py|*.zip|*.json) continue ;;
         afl-*|llvm-symbolizer) continue ;;
     esac
 
