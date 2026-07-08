@@ -67,7 +67,7 @@ jobs:
 
           # Create stub libFuzzingEngine so meson's oss-fuzz probe passes
           echo 'int main(){}' | $CC -x c - -c -o /tmp/work/empty.o
-          ar rcs /usr/lib/libFuzzingEngine.a /tmp/work/empty.o
+          sudo ar rcs /usr/lib/libFuzzingEngine.a /tmp/work/empty.o
           sudo ldconfig
 
           cd /tmp/src/systemd

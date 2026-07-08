@@ -76,7 +76,7 @@ jobs:
             export CXXFLAGS="${CXXFLAGS} -Wno-error -Wno-default-const-init-field-unsafe -Wno-uninitialized-const-pointer"
           fi
           sh ./autogen.sh
-          ./configure --disable-shared --disable-bindings --enable-release --disable-werror
+          AFL_QUIET=1 ./configure --disable-shared --disable-bindings --enable-release --disable-werror
           make -j$(nproc)
           $CC $CFLAGS src/.libs/libredwg.a -I./include -I./src -c examples/llvmfuzz.c
           $CXX $CXXFLAGS $LIB_FUZZING_ENGINE llvmfuzz.o src/.libs/libredwg.a \

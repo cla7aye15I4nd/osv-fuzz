@@ -45,33 +45,65 @@ jobs:
           git clone --depth 1 --recursive https://chromium.googlesource.com/webm/libwebp /tmp/src/libwebp
           git clone --depth 1 --recursive https://chromium.googlesource.com/webm/libwebp-test-data /tmp/src/libwebp-test-data
 
-      - name: Build fuzz targets with AFL++
+      - name: Build libwebp with AFL++ instrumentation
         run: |
-          mkdir -p build/fuzz-targets /tmp/work
           export CC=afl-cc
           export CXX=afl-c++
-          export CFLAGS="${CFLAGS:-} -fsanitize=address"
-          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
-          export FUZZING_ENGINE=afl
-          export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
-          export SANITIZER=address
-          export ARCHITECTURE=x86_64
-          export SRC=/tmp/src
-          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
-          export WORK=/tmp/work
-          # Take ownership of /usr/local for install commands (Docker runs as root)
-          sudo chown -R $(id -u):$(id -g) /usr/local 2>/dev/null || true
-          # Allow ldconfig to update cache
-          sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
-          sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
-          echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+          export CFLAGS="-fsanitize=address -DWEBP_MAX_IMAGE_SIZE=838860800"
+          export CXXFLAGS="-fsanitize=address"
+
           cd /tmp/src/libwebp
-          set +e
-          bash tests/fuzzer/oss-fuzz/build.sh
-          find $GITHUB_WORKSPACE/build/fuzz-targets/
-          set -e
+          cmake -S . -B build \
+            -DCMAKE_C_COMPILER=afl-cc \
+            -DCMAKE_CXX_COMPILER=afl-c++ \
+            -DCMAKE_C_FLAGS="$CFLAGS" \
+            -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DWEBP_BUILD_CWEBP=OFF \
+            -DWEBP_BUILD_DWEBP=OFF \
+            -DWEBP_BUILD_GIF2WEBP=OFF \
+            -DWEBP_BUILD_IMG2WEBP=OFF \
+            -DWEBP_BUILD_VWEBP=OFF \
+            -DWEBP_BUILD_WEBPINFO=OFF \
+            -DWEBP_BUILD_WEBPMUX=OFF \
+            -DWEBP_BUILD_EXTRAS=OFF \
+            -DWEBP_BUILD_ANIM_UTILS=OFF \
+            -DWEBP_BUILD_LIBWEBPMUX=ON
+          cmake --build build -j$(nproc)
+          sudo cmake --install build
+          sudo ldconfig
+
+      - name: Compile fuzz harnesses
+        run: |
+          mkdir -p build/fuzz-targets
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          HARNESS_DIR=$GITHUB_WORKSPACE/harnesses/libwebp
+          COMMON_FLAGS="-fsanitize=address,fuzzer -I/usr/local/include"
+          COMMON_LIBS="-L/usr/local/lib -lwebp -lsharpyuv -lpthread -lm"
+          DEMUX_LIBS="-L/usr/local/lib -lwebpdemux -lwebp -lsharpyuv -lpthread -lm"
+          MUX_LIBS="-L/usr/local/lib -lwebpmux -lwebpdemux -lwebp -lsharpyuv -lpthread -lm"
+
+          afl-cc $COMMON_FLAGS "$HARNESS_DIR/simple_api_fuzzer.c" \
+            -o "$OUT/simple_api_fuzzer" $COMMON_LIBS
+
+          afl-cc $COMMON_FLAGS "$HARNESS_DIR/advanced_api_fuzzer.c" \
+            -o "$OUT/advanced_api_fuzzer" $COMMON_LIBS
+
+          afl-cc $COMMON_FLAGS "$HARNESS_DIR/animdecoder_fuzzer.c" \
+            -o "$OUT/animdecoder_fuzzer" $DEMUX_LIBS
+
+          afl-cc $COMMON_FLAGS "$HARNESS_DIR/enc_dec_fuzzer.c" \
+            -o "$OUT/enc_dec_fuzzer" $COMMON_LIBS
+
+          afl-cc $COMMON_FLAGS "$HARNESS_DIR/mux_demux_api_fuzzer.c" \
+            -o "$OUT/mux_demux_api_fuzzer" $MUX_LIBS
+
+          # Copy the fuzzing dictionary from source tree
+          cp /tmp/src/libwebp/tests/fuzzer/fuzz.dict "$OUT/" 2>/dev/null || true
+
           # Verify at least one fuzz target was built
-          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          target_count=$(find "$OUT" -type f -executable 2>/dev/null | wc -l)
           echo "[+] Built $target_count fuzz targets"
           if [ "$target_count" -eq 0 ]; then
             echo "[!] No fuzz targets built — build failed"

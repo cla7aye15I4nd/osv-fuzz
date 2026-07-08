@@ -76,6 +76,7 @@ jobs:
 
           # Build all dependencies using upstream ext scripts
           cd ext
+          touch zlib.patch
           bash aom.cmd
           bash dav1d.cmd
           bash libjpeg.cmd

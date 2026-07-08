@@ -35,6 +35,7 @@ jobs:
             automake \
             bsdmainutils \
             libtool \
+            python-is-python3 \
             zip
 
       - name: Clone source
@@ -47,7 +48,8 @@ jobs:
           git clone --depth 1 https://github.com/JacobBarthelmeh/wolf-ssl-ssh-fuzzers /tmp/src/wolf-ssl-ssh-fuzzers
           git clone --depth 1 https://github.com/MozillaSecurity/cryptofuzz /tmp/src/cryptofuzz || true
           git clone --depth 1 https://github.com/google/wycheproof.git /tmp/src/wycheproof
-          git clone --depth 1 https://github.com/wolfssl/oss-fuzz-targets /tmp/src/oss-fuzz-targets
+          git clone --depth 1 https://github.com/wolfssl/oss-fuzz-targets /tmp/src/fuzz-targets
+          wget -q https://archives.boost.io/release/1.82.0/source/boost_1_82_0.tar.bz2 -O /tmp/src/boost_1_82_0.tar.bz2
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -86,7 +88,7 @@ jobs:
               cd boost_1_82_0/
               CFLAGS="" CXXFLAGS="" ./bootstrap.sh
               CFLAGS="" CXXFLAGS="" ./b2 headers
-              cp -R boost/ /usr/include/
+              sudo cp -R boost/ /usr/include/
               OLD_CFLAGS="$CFLAGS"
               OLD_CXXFLAGS="$CXXFLAGS"
               cd /tmp/src/cryptofuzz
@@ -282,6 +284,7 @@ jobs:
               mkdir /tmp/src/cryptofuzz-seed-corpus/
               find /tmp/src/wycheproof/testvectors_v1/ -type f -name 'ecdsa_*' -exec /tmp/src/cryptofuzz-fastmath/cryptofuzz --from-wycheproof={},/tmp/src/cryptofuzz-seed-corpus/ \;
               find /tmp/src/wycheproof/testvectors_v1/ -type f -name 'ecdh_*' -exec /tmp/src/cryptofuzz-fastmath/cryptofuzz --from-wycheproof={},/tmp/src/cryptofuzz-seed-corpus/ \;
+              mkdir -p /tmp/src/cryptofuzz_seed_corpus/
               unzip -n /tmp/src/corpus_bearssl.zip -d /tmp/src/cryptofuzz_seed_corpus/ >/dev/null
               unzip -n /tmp/src/corpus_libecc.zip -d /tmp/src/cryptofuzz_seed_corpus/ >/dev/null
               unzip -n /tmp/src/corpus_relic.zip -d /tmp/src/cryptofuzz_seed_corpus/ >/dev/null
@@ -322,6 +325,7 @@ jobs:
               ./configure --enable-static --disable-shared --prefix=/usr CC="clang"
               make -j "$(nproc)" all
               sudo make install
+              sudo ldconfig
               export LDFLAGS="${LDFLAGS-""}"
               export LDLIBS="${LDLIBS-""} -lwolfssl $LIB_FUZZING_ENGINE"
               cd "${target_dir}"

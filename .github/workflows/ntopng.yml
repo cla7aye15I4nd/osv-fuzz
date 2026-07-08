@@ -36,6 +36,8 @@ jobs:
             bison \
             flex \
             groff \
+            libc++-dev \
+            libc++abi-dev \
             libcurl4-openssl-dev \
             libglib2.0-dev \
             liblzma-dev \
@@ -52,6 +54,17 @@ jobs:
           git clone --depth 1 --recursive https://github.com/ntop/ntopng.git /tmp/src/ntopng
           git clone --depth 1 --recursive https://github.com/google/libprotobuf-mutator.git /tmp/src/libprotobuf-mutator
           git clone --depth 1 --recursive https://github.com/ntop/nDPI.git /tmp/src/nDPI
+          # Download static-linking dependencies (mirroring oss-fuzz Dockerfile)
+          cd /tmp/src
+          wget -q https://www.tcpdump.org/release/libpcap-1.9.1.tar.gz
+          tar -xzf libpcap-1.9.1.tar.gz
+          wget -q https://github.com/zeromq/libzmq/releases/download/v4.3.5/zeromq-4.3.5.tar.gz
+          tar -xzf zeromq-4.3.5.tar.gz
+          wget -q -O json-c-0.17-20230812.tar.gz \
+            https://github.com/json-c/json-c/archive/refs/tags/json-c-0.17-20230812.tar.gz
+          tar -xzf json-c-0.17-20230812.tar.gz
+          wget -q https://github.com/maxmind/libmaxminddb/releases/download/1.7.1/libmaxminddb-1.7.1.tar.gz
+          tar -xzf libmaxminddb-1.7.1.tar.gz
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -65,6 +78,8 @@ jobs:
           export SANITIZER=address
           export ARCHITECTURE=x86_64
           export SRC=/tmp/src
+          export NDPI_HOME=/tmp/src/nDPI
+          export NTOPNG_HOME=/tmp/src/ntopng
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
           # Take ownership of /usr/local for install commands (Docker runs as root)
@@ -74,7 +89,6 @@ jobs:
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/ntopng
-          set +e
           CFLAGS_SAVE="$CFLAGS"
           CXXFLAGS_SAVE="$CXXFLAGS"
           unset CFLAGS
@@ -118,6 +132,7 @@ jobs:
           export CFLAGS="${CFLAGS_SAVE}"
           export CXXFLAGS="${CXXFLAGS_SAVE}"
           unset AFL_NOOPT
+          sudo ldconfig
           cd $NTOPNG_HOME
           ./autogen.sh
           ./configure --enable-fuzztargets --without-hiredis --with-zmq-static \
@@ -125,7 +140,6 @@ jobs:
           make -j$(nproc) fuzz_all
           find fuzz/ -regex 'fuzz/fuzz_[a-z_]*\(\.\(zip\|dict\|options\)\)?' -exec cp {} $GITHUB_WORKSPACE/build/fuzz-targets/ \;
           mkdir -p $GITHUB_WORKSPACE/build/fuzz-targets/install $GITHUB_WORKSPACE/build/fuzz-targets/data-dir $GITHUB_WORKSPACE/build/fuzz-targets/docs $GITHUB_WORKSPACE/build/fuzz-targets/scripts/callbacks
-          set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
           echo "[+] Built $target_count fuzz targets"
