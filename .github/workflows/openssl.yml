@@ -1,0 +1,197 @@
+name: "Fuzz openssl"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: openssl
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/openssl/openssl.git /tmp/src/openssl
+          git clone --depth 1 https://github.com/openssl/openssl.git /tmp/src/openssl30
+          git clone --depth 1 https://github.com/openssl/openssl.git /tmp/src/openssl33
+          git clone --depth 1 https://github.com/openssl/openssl.git /tmp/src/openssl34
+          git clone --depth 1 https://github.com/openssl/openssl.git /tmp/src/openssl35
+          git clone --depth 1 https://github.com/openssl/openssl.git /tmp/src/openssl36
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/openssl
+          export FUZZ_INTROSPECTOR_CONFIG=/tmp/src/openssl/fuzz/fuzz_introspector_exclusion.config
+          CONFIGURE_FLAGS="--debug enable-fuzz-libfuzzer -DPEDANTIC -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION no-shared enable-tls1_3 enable-rc5 enable-md2 enable-nextprotoneg enable-weak-ssl-ciphers --with-fuzzer-lib=/usr/lib/libFuzzingEngine $CFLAGS -fno-sanitize=alignment enable-unit-test no-tests"
+          if [[ $CFLAGS = *sanitize=memory* ]]
+          then
+            CONFIGURE_FLAGS="$CONFIGURE_FLAGS no-asm"
+          fi
+          if [[ $CFLAGS != *-m32* ]]
+          then
+            CONFIGURE_FLAGS="$CONFIGURE_FLAGS enable-ec_nistp_64_gcc_128"
+          fi
+          if [[ $CFLAGS = *-m32* ]]
+          then
+            CONFIGURE_FLAGS="$CONFIGURE_FLAGS no-threads"
+          fi
+          function build_fuzzers() {
+              SUFFIX=$1
+              local EXTRA_CONFIGURE_FLAGS="$2"
+              local EXTRA_SOURCES="$3"
+              if [[ $CFLAGS = *-m32* ]]
+              then
+                  setarch i386 ./config $CONFIGURE_FLAGS $EXTRA_CONFIGURE_FLAGS
+              else
+                  ./config $CONFIGURE_FLAGS $EXTRA_CONFIGURE_FLAGS
+              fi
+              df -h
+              make -j$(nproc) LDCMD="$CXX $CXXFLAGS"
+              fuzzers=$(find fuzz -executable -type f '!' -name \*.py '!' -name \*-test '!' -name \*.pl '!' -name \*.sh)
+              for f in $fuzzers; do
+                  fuzzer=$(basename $f)
+                  cp $f $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer}${SUFFIX}
+                  zip -j $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer}${SUFFIX}_seed_corpus.zip fuzz/corpora/${fuzzer}/*
+              done
+              options=$(find /tmp/src/ -maxdepth 1 -name '*.options')
+              for o in $options; do
+                  o_base=$(basename $o)
+                  fuzzer=${o_base%".options"}
+                  cp $o $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer}${SUFFIX}.options
+              done
+              cp fuzz/oids.txt $GITHUB_WORKSPACE/build/fuzz-targets/asn1${SUFFIX}.dict
+              cp fuzz/oids.txt $GITHUB_WORKSPACE/build/fuzz-targets/x509${SUFFIX}.dict
+              if [ "$SANITIZER" == coverage ]; then
+                DESTDIR=$GITHUB_WORKSPACE/build/fuzz-targets/src/openssl${SUFFIX#_}
+                SOURCES="include crypto ssl providers fuzz $EXTRA_SOURCES"
+                mkdir -p $DESTDIR
+                if [ -f e_os.h ]; then
+                  cp e_os.h $DESTDIR/
+                fi
+                find $SOURCES -type f -a \( -name '*.[ch]' -o -name '*.inc' \) -exec cp --parents '{}' $DESTDIR/ \;
+              fi
+              df -h
+              if [[ -z "${CAPTURE_REPLAY_SCRIPT:-}" ]]; then
+                git clean -dfx
+              fi
+              df -h
+          }
+          cd /tmp/src/openssl/
+          build_fuzzers "" "no-apps no-docs" ""
+          if [[ "$SANITIZER" == introspector || -n "${INDEXER_BUILD:-}" || -n "${CAPTURE_REPLAY_SCRIPT:-}" ]]; then
+            exit 0
+          fi
+          cd /tmp/src/openssl30/
+          build_fuzzers "_30" "" "engines"
+          cd /tmp/src/openssl33/
+          build_fuzzers "_33" "no-apps no-docs" "engines"
+          cd /tmp/src/openssl34/
+          build_fuzzers "_34" "no-apps no-docs" "engines"
+          cd /tmp/src/openssl35/
+          build_fuzzers "_35" "no-apps no-docs" "engines"
+          cd /tmp/src/openssl36/
+          build_fuzzers "_36" "no-apps no-docs" "engines"
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

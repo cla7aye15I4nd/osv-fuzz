@@ -1,0 +1,174 @@
+name: "Fuzz mruby"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: mruby
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            bison \
+            cmake \
+            libbz2-dev \
+            liblzma-dev \
+            ninja-build \
+            ruby \
+            zlib1g-dev
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/mruby/mruby /tmp/src/mruby
+          git clone --depth 1 https://github.com/bshastry/mruby_seeds.git /tmp/src/mruby_seeds
+          git clone --depth 1 https://github.com/google/libprotobuf-mutator.git /tmp/src/libprotobuf-mutator
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src
+          (
+          cd /tmp/src/mruby
+          export LD=$CC
+          export LDFLAGS="$CFLAGS"
+          rake all
+          rake test || true
+          FUZZ_TARGET=/tmp/src/mruby/oss-fuzz/mruby_fuzzer.c
+          name=$(basename $FUZZ_TARGET .c)
+          $CC -c $CFLAGS -Iinclude -Ibuild/host/include \
+               ${FUZZ_TARGET} -o $GITHUB_WORKSPACE/build/fuzz-targets/${name}.o
+          $CXX $CXXFLAGS $GITHUB_WORKSPACE/build/fuzz-targets/${name}.o $LIB_FUZZING_ENGINE -lm \
+              /tmp/src/mruby/build/host/lib/libmruby.a -o $GITHUB_WORKSPACE/build/fuzz-targets/${name}
+          rm -f $GITHUB_WORKSPACE/build/fuzz-targets/${name}.o
+          )
+          cat > /tmp/src/mruby/oss-fuzz/config/mruby_fuzzer.options <<EOF
+          [libfuzzer]
+          dict = mruby.dict
+          only_ascii = 1
+          EOF
+          cp /tmp/src/mruby/oss-fuzz/config/mruby_fuzzer.options /tmp/src/mruby/oss-fuzz/config/mruby_proto_fuzzer.options
+          if [[ $CFLAGS != *sanitize=memory* ]]; then
+              PROTO_FUZZ_TARGET=/tmp/src/mruby/oss-fuzz/mruby_proto_fuzzer.cpp
+              PROTO_CONVERTER=/tmp/src/mruby/oss-fuzz/proto_to_ruby.cpp
+              rm -rf /tmp/src/mruby/genfiles
+              mkdir /tmp/src/mruby/genfiles
+              /tmp/src/LPM/external.protobuf/bin/protoc --proto_path=/tmp/src/mruby/oss-fuzz ruby.proto --cpp_out=/tmp/src/mruby/genfiles
+              $CXX -c $CXXFLAGS /tmp/src/mruby/genfiles/ruby.pb.cc -DNDEBUG -o /tmp/src/mruby/genfiles/ruby.pb.o -I /tmp/src/LPM/external.protobuf/include
+              $CXX -I /tmp/src/mruby/include -I /tmp/src/mruby/build/host/include -I /tmp/src/LPM/external.protobuf/include $CXXFLAGS $PROTO_FUZZ_TARGET /tmp/src/mruby/genfiles/ruby.pb.o $PROTO_CONVERTER \
+                -I /tmp/src/mruby/genfiles \
+                -I /tmp/src/libprotobuf-mutator \
+                -lz -lm \
+                /tmp/src/LPM/src/libfuzzer/libprotobuf-mutator-libfuzzer.a \
+                /tmp/src/LPM/src/libprotobuf-mutator.a \
+                -Wl,--start-group /tmp/src/LPM/external.protobuf/lib/lib*.a -Wl,--end-group \
+                /tmp/src/mruby/build/host/lib/libmruby.a \
+                $LIB_FUZZING_ENGINE \
+                -o $GITHUB_WORKSPACE/build/fuzz-targets/mruby_proto_fuzzer
+              cp /tmp/src/mruby/oss-fuzz/config/mruby_proto_fuzzer.options $GITHUB_WORKSPACE/build/fuzz-targets
+          fi
+          cp /tmp/src/mruby/oss-fuzz/config/mruby.dict $GITHUB_WORKSPACE/build/fuzz-targets
+          cp /tmp/src/mruby/oss-fuzz/config/mruby_fuzzer.options $GITHUB_WORKSPACE/build/fuzz-targets
+          zip -rq $GITHUB_WORKSPACE/build/fuzz-targets/mruby_fuzzer_seed_corpus /tmp/src/mruby_seeds
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

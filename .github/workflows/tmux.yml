@@ -1,0 +1,161 @@
+name: "Fuzz tmux"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: tmux
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            bison \
+            libtool \
+            ncurses-dev \
+            pkg-config
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/libevent/libevent.git /tmp/src/&&
+          git clone --depth 1 https://github.com/tmux/tmux.git /tmp/src/tmux
+          git clone --depth 1 https://github.com/tmux/tmux-fuzzing-corpus.git /tmp/src/tmux-fuzzing-corpus
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/tmux
+          export PKG_CONFIG_PATH="/usr/local/lib/"
+          ./autogen.sh
+          ./configure \
+              --enable-fuzzing \
+              FUZZING_LIBS="${LIB_FUZZING_ENGINE} -lc++" \
+              LIBEVENT_LIBS="-Wl,-Bstatic -levent -Wl,-Bdynamic" \
+              LIBTINFO_LIBS=" -l:libtinfo.a "
+          make -j"$(nproc)" check
+          find "/tmp/src/tmux/fuzz/" -name '*-fuzzer' -exec cp -v '{}' "$GITHUB_WORKSPACE/build/fuzz-targets"/ \;
+          find "/tmp/src/tmux/fuzz/" -name '*-fuzzer.options' -exec cp -v '{}' "$GITHUB_WORKSPACE/build/fuzz-targets"/ \;
+          find "/tmp/src/tmux/fuzz/" -name '*-fuzzer.dict' -exec cp -v '{}' "$GITHUB_WORKSPACE/build/fuzz-targets"/ \;
+          MAXLEN=$(grep -Po 'max_len\s+=\s+\K\d+' "$GITHUB_WORKSPACE/build/fuzz-targets/input-fuzzer.options")
+          if [ ! -d "/tmp/work/fuzzing_corpus" ]; then
+              mkdir "/tmp/work/fuzzing_corpus"
+              cd "/tmp/work/fuzzing_corpus"
+              bash "/tmp/src/tmux/tools/24-bit-color.sh" | \
+                  split -a4 -db$MAXLEN - 24-bit-color.out.
+              perl "/tmp/src/tmux/tools/256colors.pl" | \
+                  split -a4 -db$MAXLEN - 256colors.out.
+              cat "/tmp/src/tmux/tools/UTF-8-demo.txt" | \
+                  split -a4 -db$MAXLEN - UTF-8-demo.txt.
+              cat "/tmp/src/tmux-fuzzing-corpus/alacritty"/* | \
+                  split -a4 -db$MAXLEN - alacritty.
+              cat "/tmp/src/tmux-fuzzing-corpus/esctest"/* | \
+                  split -a4 -db$MAXLEN - esctest.
+              cat "/tmp/src/tmux-fuzzing-corpus/iterm2"/* | \
+                  split -a5 -db$MAXLEN - iterm2.
+              zip -q -j -r "$GITHUB_WORKSPACE/build/fuzz-targets/input-fuzzer_seed_corpus.zip" \
+                  "/tmp/work/fuzzing_corpus/"
+          fi
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

@@ -1,0 +1,181 @@
+name: "Fuzz python3-libraries"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: python3-libraries
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            libbz2-dev \
+            libc6-dev \
+            libffi-dev \
+            libgdbm-dev \
+            liblzma-dev \
+            libncursesw5-dev \
+            libreadline-dev \
+            libsqlite3-dev \
+            libssl-dev \
+            libzstd-dev \
+            tk-dev \
+            zlib1g-dev
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/python/cpython.git /tmp/src/cpython
+          git clone --depth 1 https://github.com/python/library-fuzzers.git /tmp/src/library-fuzzers
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src
+          export ASAN_OPTIONS="detect_leaks=0"
+          export MSAN_OPTIONS="halt_on_error=0:exitcode=0:report_umrs=0"
+          CFLAGS=${CFLAGS//"-pthread"/}
+          FLAGS=()
+          case $SANITIZER in
+            address)
+              FLAGS+=("--with-address-sanitizer")
+              ;;
+            memory)
+              FLAGS+=("--with-memory-sanitizer")
+              FLAGS+=("CFLAGS=-mllvm -msan-keep-going=1")
+              ;;
+            undefined)
+              FLAGS+=("--with-undefined-behavior-sanitizer")
+              ;;
+          esac
+          export CPYTHON_INSTALL_PATH=/tmp/src/cpython-install
+          rm -rf $CPYTHON_INSTALL_PATH
+          mkdir $CPYTHON_INSTALL_PATH
+          cd /tmp/src/cpython
+          cp /tmp/src/library-fuzzers/python_coverage.h Python/
+          sed -i '1 s/^.*$/#include "python_coverage.h"/g' Python/ceval.c
+          sed -i 's/case TARGET\(.*\): {/\0\nfuzzer_record_code_coverage(f->f_code, f->f_lasti);/g' Python/ceval.c
+          ./configure "${FLAGS[@]:-}" --prefix=$CPYTHON_INSTALL_PATH
+          make -j$(nproc)
+          make install
+          cp -R $CPYTHON_INSTALL_PATH $GITHUB_WORKSPACE/build/fuzz-targets/
+          $GITHUB_WORKSPACE/build/fuzz-targets/cpython-install/bin/python3 -m pip install hypothesis
+          cd /tmp/src/library-fuzzers
+          make
+          while read -r name fuzzer; do
+            cp /tmp/src/library-fuzzers/fuzzer-$name $GITHUB_WORKSPACE/build/fuzz-targets/
+            cp /tmp/src/library-fuzzers/$fuzzer $GITHUB_WORKSPACE/build/fuzz-targets/
+            if [ -d "corp-$name" ]; then
+              zip -j "$GITHUB_WORKSPACE/build/fuzz-targets/fuzzer-${name}_seed_corpus.zip" corp-$name/*
+            fi
+            if [ -f "fuzzer-${name}.dict" ]; then
+              cp "fuzzer-${name}.dict" "$GITHUB_WORKSPACE/build/fuzz-targets/fuzzer-${name}.dict"
+            fi
+          done < /tmp/src/library-fuzzers/fuzz_targets.txt
+          cp /tmp/src/library-fuzzers/fuzzeddataprovider.py $GITHUB_WORKSPACE/build/fuzz-targets/
+          cp /tmp/src/cpython/Modules/_xxtestfuzz/dictionaries/fuzz_pycompile.dict $GITHUB_WORKSPACE/build/fuzz-targets/fuzzer-ast.dict
+          mkdir corp-ast/
+          find /tmp/src/cpython -type f -name '*.py' -size -4097c -exec cp {} corp-ast/ \;
+          zip -j $GITHUB_WORKSPACE/build/fuzz-targets/fuzzer-ast_seed_corpus.zip corp-ast/*
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

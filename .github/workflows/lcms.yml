@@ -1,0 +1,168 @@
+name: "Fuzz lcms"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: lcms
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            libtool
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/mm2/Little-CMS.git /tmp/src/lcms
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/lcms
+          ./configure --enable-shared=no
+          make -j$(nproc) all
+          FUZZERS="cmsIT8_load_fuzzer            \
+                  cms_transform_fuzzer           \
+                  cms_overwrite_transform_fuzzer \
+                  cms_transform_all_fuzzer       \
+                  cms_profile_fuzzer             \
+                  cms_universal_transform_fuzzer \
+                  cms_transform_extended_fuzzer  \
+                  cms_md5_fuzzer                 \
+                  cms_dict_fuzzer                \
+                  cms_postscript_fuzzer          \
+                  cms_cie_cam02_fuzzer           \
+                  cms_gdb_fuzzer                 \
+                  cms_cgats_fuzzer               \
+                  cms_virtual_profile_fuzzer     \
+                  cms_devicelink_fuzzer" 
+          for F in $FUZZERS; do
+              $CC $CFLAGS -c -Iinclude \
+                  /tmp/src/$F.c -o /tmp/src/$F.o
+              $CXX $CXXFLAGS \
+                  /tmp/src/$F.o -o $GITHUB_WORKSPACE/build/fuzz-targets/$F \
+                  $LIB_FUZZING_ENGINE src/.libs/liblcms2.a
+          done
+          cp /tmp/src/*.dict /tmp/src/*.options $GITHUB_WORKSPACE/build/fuzz-targets/
+          cp /tmp/src/icc.dict $GITHUB_WORKSPACE/build/fuzz-targets/cms_transform_all_fuzzer.dict
+          cp /tmp/src/icc.dict $GITHUB_WORKSPACE/build/fuzz-targets/cms_transform_extended_fuzzer.dict
+          cp /tmp/src/icc.dict $GITHUB_WORKSPACE/build/fuzz-targets/cms_universal_transform_fuzzer.dict
+          cp /tmp/src/icc.dict $GITHUB_WORKSPACE/build/fuzz-targets/cms_profile_fuzzer.dict
+          cp /tmp/src/icc.dict $GITHUB_WORKSPACE/build/fuzz-targets/cms_postscript_fuzzer.dict
+          cp /tmp/src/icc.dict $GITHUB_WORKSPACE/build/fuzz-targets/cms_virtual_profile_fuzzer.dict
+          cp /tmp/src/icc.dict $GITHUB_WORKSPACE/build/fuzz-targets/cms_md5_fuzzer.dict
+          cp /tmp/src/seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/cms_postscript_fuzzer_seed_corpus.zip
+          cp /tmp/src/seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/cms_profile_fuzzer_seed_corpus.zip
+          cp /tmp/src/seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/cms_universal_transform_fuzzer_seed_corpus.zip
+          cp /tmp/src/seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/cms_transform_all_fuzzer_seed_corpus.zip
+          cp /tmp/src/seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/cms_transform_extended_fuzzer_seed_corpus.zip
+          cp /tmp/src/seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/cms_transform_fuzzer_seed_corpus.zip
+          cp /tmp/src/seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/cms_virtual_profile_fuzzer_seed_corpus.zip
+          cp /tmp/src/seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/cmsIT8_load_fuzzer_seed_corpus.zip
+          cp /tmp/src/seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/cms_md5_fuzzer_seed_corpus.zip
+          cp /tmp/src/seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/cms_overwrite_transform_fuzzer_seed_corpus.zip
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

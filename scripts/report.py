@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import re
+import shutil
 import sys
 from hashlib import md5
 from pathlib import Path
@@ -40,56 +41,98 @@ def main():
     results_dir = Path(sys.argv[1])
     project = sys.argv[2] if len(sys.argv) > 2 else results_dir.name
 
+    # Collect crashes from both dry_run and fuzz subdirs
     seen = {}
-    for report_file in sorted(results_dir.glob("*.txt")):
-        if report_file.name == "summary.json":
+    for subdir in ["dry_run", "fuzz"]:
+        scan_dir = results_dir / subdir
+        if not scan_dir.exists():
             continue
-        content = report_file.read_text(errors="replace")
-        backtrace = parse_backtrace(content)
-        if not backtrace:
-            continue
+        for report_file in sorted(scan_dir.glob("*.txt")):
+            if report_file.name == "summary.json":
+                continue
+            content = report_file.read_text(errors="replace")
+            backtrace = parse_backtrace(content)
+            if not backtrace:
+                continue
 
-        bt_hash = hash_backtrace(backtrace)
-        crash_type = detect_crash_type(content)
-        key = f"{bt_hash}_{crash_type}"
+            bt_hash = hash_backtrace(backtrace)
+            crash_type = detect_crash_type(content)
+            key = f"{bt_hash}_{crash_type}"
 
-        if key not in seen:
-            is_dry_run = "_fuzz_" not in report_file.name
-            crash_summary = ""
-            for line in content.splitlines():
-                if "ERROR:" in line:
-                    crash_summary = line.strip()
-                    break
+            bin_file = report_file.with_suffix(".bin")
 
-            seen[key] = {
-                "hash": bt_hash,
-                "type": crash_type,
-                "crash_summary": crash_summary,
-                "stack_frames": [f"{func} {src}" for func, src in backtrace[:5]],
-                "triggered_by": [report_file.name],
-                "from_dry_run": is_dry_run,
-                "from_fuzz": not is_dry_run,
-            }
-        else:
-            seen[key]["triggered_by"].append(report_file.name)
-            if "_fuzz_" in report_file.name:
-                seen[key]["from_fuzz"] = True
+            if key not in seen:
+                crash_summary = ""
+                for line in content.splitlines():
+                    if "ERROR:" in line:
+                        crash_summary = line.strip()
+                        break
+
+                seen[key] = {
+                    "hash": bt_hash,
+                    "type": crash_type,
+                    "crash_summary": crash_summary,
+                    "stack_frames": [f"{func} {src}" for func, src in backtrace[:5]],
+                    "triggered_by": [report_file.name],
+                    "from_dry_run": subdir == "dry_run",
+                    "from_fuzz": subdir == "fuzz",
+                    "report_file": str(report_file),
+                    "input_file": str(bin_file) if bin_file.exists() else None,
+                }
             else:
-                seen[key]["from_dry_run"] = True
+                seen[key]["triggered_by"].append(report_file.name)
+                if subdir == "fuzz":
+                    seen[key]["from_fuzz"] = True
+                else:
+                    seen[key]["from_dry_run"] = True
+
+    # Collect hangs (no ASAN report, just the input)
+    hangs = []
+    fuzz_dir = results_dir / "fuzz"
+    if fuzz_dir.exists():
+        for hang_file in sorted(fuzz_dir.glob("*_hang_*.bin")):
+            hangs.append({
+                "file": hang_file.name,
+                "path": str(hang_file),
+            })
+
+    # Build deduplicated PoC export directory
+    pocs_dir = results_dir / "pocs"
+    crashes_dir = pocs_dir / "crashes"
+    hangs_dir = pocs_dir / "hangs"
+    crashes_dir.mkdir(parents=True, exist_ok=True)
+    hangs_dir.mkdir(parents=True, exist_ok=True)
+
+    for crash in seen.values():
+        h = crash["hash"][:12]
+        if crash.get("input_file") and Path(crash["input_file"]).exists():
+            shutil.copy2(crash["input_file"], crashes_dir / f"{h}_input.bin")
+        if crash.get("report_file") and Path(crash["report_file"]).exists():
+            shutil.copy2(crash["report_file"], crashes_dir / f"{h}_report.txt")
+
+    for hang in hangs:
+        if Path(hang["path"]).exists():
+            shutil.copy2(hang["path"], hangs_dir / hang["file"])
 
     report = {
         "project": project,
         "unique_crashes": list(seen.values()),
+        "hangs": hangs,
         "summary": {
-            "total_unique": len(seen),
+            "total_unique_crashes": len(seen),
             "asan_unique": sum(1 for c in seen.values() if c["type"] == "asan"),
             "from_dry_run": sum(1 for c in seen.values() if c["from_dry_run"]),
             "from_fuzz": sum(1 for c in seen.values() if c["from_fuzz"]),
+            "total_hangs": len(hangs),
         },
     }
 
     output_path = results_dir / "report.json"
     output_path.write_text(json.dumps(report, indent=2))
+
+    # Also save a copy in pocs/
+    (pocs_dir / "report.json").write_text(json.dumps(report, indent=2))
+
     print(json.dumps(report["summary"], indent=2))
 
 

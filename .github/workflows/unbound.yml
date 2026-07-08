@@ -1,0 +1,187 @@
+name: "Fuzz unbound"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: unbound
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            bison \
+            flex \
+            libexpat-dev \
+            libssl-dev \
+            libtool
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/NLnetLabs/unbound /tmp/src/unbound
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/unbound
+          CFLAGS="${CFLAGS} -DVALGRIND=1"
+          ./configure
+          make -j6 all unittest
+          $CC $CFLAGS -I. -DSRCDIR=. -c -o parse_packet_fuzzer.o parse_packet_fuzzer.c
+          $CC $CFLAGS -I. -DSRCDIR=. -c -o fuzz_1.o fuzz_1.c
+          $CC $CFLAGS -I. -DSRCDIR=. -c -o fuzz_2.o fuzz_2.c
+          $CC $CFLAGS -I. -DSRCDIR=. -c -o fuzz_3.o fuzz_3.c
+          $CC $CFLAGS -I. -DSRCDIR=. -c -o fuzz_4.o fuzz_4.c
+          LIBOBJS=`make --eval 'echolibobjs: ; @echo "$(LIBOBJS)"' echolibobjs`
+          OBJECTS_TO_LINK="dns.o infra.o rrset.o dname.o \
+            msgencode.o as112.o msgparse.o msgreply.o packed_rrset.o iterator.o \
+            iter_delegpt.o iter_donotq.o iter_fwd.o iter_hints.o iter_priv.o \
+            iter_resptype.o iter_scrub.o iter_utils.o localzone.o mesh.o modstack.o view.o \
+            outbound_list.o alloc.o config_file.o configlexer.o configparser.o \
+            fptr_wlist.o edns.o locks.o log.o mini_event.o module.o net_help.o random.o \
+            rbtree.o regional.o rtt.o dnstree.o lookup3.o lruhash.o slabhash.o \
+            tcp_conn_limit.o timehist.o tube.o winsock_event.o autotrust.o val_anchor.o \
+            validator.o val_kcache.o val_kentry.o val_neg.o val_nsec3.o val_nsec.o \
+            val_secalgo.o val_sigcrypt.o val_utils.o dns64.o authzone.o \
+            respip.o netevent.o listen_dnsport.o outside_network.o ub_event.o keyraw.o \
+            sbuffer.o wire2str.o parse.o parseutil.o rrdef.o str2wire.o libunbound.o \
+            libworker.o context.o rpz.o proxy_protocol.o timeval_func.o rfc_1982.o \
+            siphash.o"
+          $CXX $CXXFLAGS -std=c++11 \
+            $LIB_FUZZING_ENGINE \
+            -lssl -lcrypto -pthread \
+            -o $GITHUB_WORKSPACE/build/fuzz-targets/parse_packet_fuzzer \
+            parse_packet_fuzzer.o \
+            $OBJECTS_TO_LINK \
+            $LIBOBJS
+          $CXX $CXXFLAGS -std=c++11 \
+            $LIB_FUZZING_ENGINE \
+            -lssl -lcrypto -pthread \
+            -o $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_1_fuzzer \
+            fuzz_1.o \
+            $OBJECTS_TO_LINK \
+            $LIBOBJS
+          $CXX $CXXFLAGS -std=c++11 \
+            $LIB_FUZZING_ENGINE \
+            -lssl -lcrypto -pthread \
+            -o $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_2_fuzzer \
+            fuzz_2.o \
+            $OBJECTS_TO_LINK \
+            $LIBOBJS
+          $CXX $CXXFLAGS -std=c++11 \
+            $LIB_FUZZING_ENGINE \
+            -lssl -lcrypto -pthread \
+            -o $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_3_fuzzer \
+            fuzz_3.o \
+            $OBJECTS_TO_LINK \
+            $LIBOBJS
+          $CXX $CXXFLAGS -std=c++11 \
+            $LIB_FUZZING_ENGINE \
+            -lssl -lcrypto -pthread \
+            -o $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_4_fuzzer \
+            fuzz_4.o \
+            $OBJECTS_TO_LINK \
+            $LIBOBJS
+          wget --directory-prefix $GITHUB_WORKSPACE/build/fuzz-targets https://github.com/jsha/unbound/raw/fuzzing-corpora/testdata/parse_packet_fuzzer_seed_corpus.zip
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

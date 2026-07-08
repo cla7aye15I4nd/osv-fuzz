@@ -1,4 +1,4 @@
-name: "Fuzz curl"
+name: "Fuzz libzip"
 
 on:
   workflow_dispatch:
@@ -6,11 +6,9 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
-  schedule:
-    - cron: "0 3 * * 0"
 
 env:
-  PROJECT: curl
+  PROJECT: libzip
   FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -31,76 +29,40 @@ jobs:
         run: |
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
-            libssl-dev libnghttp2-dev libssh2-1-dev libidn2-dev \
-            librtmp-dev libpsl-dev libgsasl-dev zlib1g-dev \
-            libzstd-dev libbrotli-dev
+            cmake \
+            libbz2-dev \
+            liblzma-dev \
+            libzstd-dev \
+            pkg-config \
+            zlib1g-dev
 
-      - name: Clone curl source
-        run: git clone --depth 1 https://github.com/curl/curl.git /tmp/curl-src
-
-      - name: Clone curl-fuzzer
-        run: git clone --depth 1 https://github.com/curl/curl-fuzzer.git /tmp/curl-fuzzer
-
-      - name: Build curl with AFL++ instrumentation
+      - name: Clone source
         run: |
-          cd /tmp/curl-src
-          autoreconf -fi
-          export CC=afl-cc
-          export CXX=afl-c++
-          export AFL_USE_ASAN=1
-          ./configure \
-            --disable-shared \
-            --enable-static \
-            --with-openssl \
-            --with-nghttp2 \
-            --with-libssh2 \
-            --prefix=/tmp/curl-install
-          make -j$(nproc)
-          make install
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/nih-at/libzip.git /tmp/src/libzip
 
       - name: Build fuzz targets with AFL++
         run: |
-          mkdir -p build/fuzz-targets
-          cd /tmp/curl-fuzzer
+          mkdir -p build/fuzz-targets /tmp/work
           export CC=afl-cc
           export CXX=afl-c++
-          export AFL_USE_ASAN=1
-          export CURL_INSTALL=/tmp/curl-install
-          export PKG_CONFIG_PATH=/tmp/curl-install/lib/pkgconfig
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/libzip
+          /tmp/src/libzip/ossfuzz/ossfuzz.sh
 
-          for fuzzer_src in *.cc; do
-            [ -f "$fuzzer_src" ] || continue
-            target_name="${fuzzer_src%.cc}"
-            echo "[+] Building $target_name..."
-
-            $CXX $CXXFLAGS -std=c++11 \
-              -I/tmp/curl-install/include \
-              -c "$fuzzer_src" -o "${target_name}.o" 2>/dev/null || continue
-
-            $CXX $CXXFLAGS \
-              "${target_name}.o" \
-              -o "$GITHUB_WORKSPACE/build/fuzz-targets/${target_name}" \
-              /tmp/curl-install/lib/libcurl.a \
-              -lssl -lcrypto -lnghttp2 -lssh2 -lidn2 -lpsl \
-              -lz -lzstd -lbrotlidec -lbrotlicommon \
-              -lpthread -ldl -lrt 2>/dev/null || {
-                echo "  [-] Link failed for $target_name, trying minimal link..."
-                $CXX $CXXFLAGS \
-                  "${target_name}.o" \
-                  -o "$GITHUB_WORKSPACE/build/fuzz-targets/${target_name}" \
-                  /tmp/curl-install/lib/libcurl.a \
-                  -lssl -lcrypto -lz -lpthread -ldl 2>/dev/null || {
-                    echo "  [-] Skipping $target_name"
-                    continue
-                  }
-              }
-
-            echo "  [+] Built $target_name"
-          done
-
-          echo ""
+      - name: Verify fuzz targets
+        run: |
           echo "[+] Built targets:"
-          ls -la "$GITHUB_WORKSPACE/build/fuzz-targets/" || echo "No targets built"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
 
       - name: Upload built fuzz targets
         uses: actions/upload-artifact@v4

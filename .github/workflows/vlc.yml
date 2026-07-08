@@ -1,0 +1,253 @@
+name: "Fuzz vlc"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: vlc
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            autopoint \
+            bison \
+            cmake \
+            ffmpeg \
+            flex \
+            gettext \
+            gperf \
+            libglu1-mesa-dev \
+            libtool \
+            nasm \
+            ninja-build \
+            pkg-config \
+            yasm
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://code.videolan.org/videolan/vlc.git /tmp/src/vlc
+          git clone --depth 1 https://code.videolan.org/VideoLAN.org/vlc-fuzz-corpus.git /tmp/src/vlc/fuzz-corpus
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/vlc
+          CFLAGS_SAVE="$CFLAGS"
+          CXXFLAGS_SAVE="$CXXFLAGS"
+          unset CFLAGS
+          unset CXXFLAGS
+          export AFL_NOOPT=1
+          export CXXFLAGS="-stdlib=libc++"
+          (cd extras/tools && ./bootstrap && make -j$(nproc) .autoconf)
+          export PATH="/tmp/src/vlc/extras/tools/build/bin:$PATH"
+          mkdir contrib/contrib-build
+          cd contrib/contrib-build
+          ../bootstrap
+          sed -i '/--target-os=linux --enable-pic/a FFMPEGCONF += --disable-xlib --disable-libxcb --disable-libxcb-shm --disable-libxcb-xfixes --disable-libxcb-shape --disable-x86asm' ../src/ffmpeg/rules.mak
+          sed -i 's|VPX_LDFLAGS := $(LDFLAGS)|VPX_LDFLAGS = $(LDFLAGS) $(filter -fsanitize%,$(CFLAGS))|' ../src/vpx/rules.mak
+          sed -i 's|LDFLAGS="$(VPX_LDFLAGS)" CROSS=$(VPX_CROSS)|LDFLAGS="$(VPX_LDFLAGS)" LD=$(CC) CROSS=$(VPX_CROSS)|' ../src/vpx/rules.mak
+          make V=1 -j$(nproc) \
+              .flac \
+              .libxml2 \
+              .ffmpeg \
+              .freetype2 \
+              .fribidi \
+              .harfbuzz \
+              .fontconfig
+          cd ../../
+          export CFLAGS="${CFLAGS_SAVE}"
+          export CXXFLAGS="${CXXFLAGS_SAVE}"
+          if [ "$SANITIZER" = "address" ]; then
+              export CFLAGS="$CFLAGS -DNDEBUG"
+              export CXXFLAGS="$CXXFLAGS -DNDEBUG"
+          fi
+          unset AFL_NOOPT
+          cd contrib/contrib-build
+          make V=1 -j$(nproc) \
+              .theora \
+              .dav1d \
+              .vpx \
+              .mpg123 \
+              .ebml \
+              .matroska \
+              .ogg \
+              .opus \
+              .vorbis \
+              .speex \
+              .speexdsp \
+              .dvbpsi \
+              .modplug \
+              .faad2 \
+              .jpeg \
+              .png \
+              .ass \
+              .kate
+          make V=1 -j$(nproc) CC="$CC" CXX="$CXX" .bpg
+          for bpg_a in ../*/lib/libbpg.a; do
+              [ -f "$bpg_a" ] || continue
+              ld -r --whole-archive "$bpg_a" -o "${bpg_a}.merged.o"
+              objcopy --wildcard --keep-global-symbol='bpg_*' "${bpg_a}.merged.o" "${bpg_a}.local.o"
+              rm -f "$bpg_a" "${bpg_a}.merged.o"
+              ar crs "$bpg_a" "${bpg_a}.local.o"
+              rm -f "${bpg_a}.local.o"
+          done
+          CFLAGS="$CFLAGS -fno-sanitize=vptr" CXXFLAGS="$CXXFLAGS -fno-sanitize=vptr" \
+              make V=1 -j$(nproc) .gme
+          cd ../../
+          sed -i 's/-fsanitize-coverage=trace-pc-guard//g' ./configure.ac
+          sed -i 's/-fsanitize-coverage=trace-cmp//g' ./configure.ac
+          sed -i 's/-fsanitize-coverage=trace-pc//g' ./configure.ac
+          sed -i 's/-lFuzzer//g'  ./configure.ac
+          sed -i 's/-lstdc++ //g' ./configure.ac
+          sed -i 's/-lstdc++/$(NULL)/g' ./test/Makefile.am
+          sed -i 's/..\/..\/lib\/libvlc_internal.h/lib\/libvlc_internal.h/g' ./test/src/input/decoder.c
+          patch -p1 < /tmp/src/fuzzing-modules.patch
+          touch ./test/dummy.cpp
+          RULE=vlc_demux_libfuzzer
+          RULE_SOURCES="${RULE}_SOURCES = vlc-demux-libfuzzer.c"
+          sed -i "s/${RULE}_LDADD/${RULE_SOURCES}\n${RULE}_LDADD/g" ./test/Makefile.am
+          RULE=vlc_demux_run
+          RULE_SOURCES="${RULE}_SOURCES = vlc-demux-run.c"
+          sed -i "s/${RULE}_LDADD/${RULE_SOURCES}\n${RULE}_LDADD/g" ./test/Makefile.am
+          sed -i 's/_SOURCES = /_SOURCES = dummy.cpp /g' ./test/Makefile.am
+          RULE="vlc_demux_libfuzzer_LDADD"
+          FUZZ_LDFLAGS="vlc_demux_libfuzzer_LDFLAGS=\${LIB_FUZZING_ENGINE}"
+          sed -i "s/${RULE}/${FUZZ_LDFLAGS}\n${RULE}/g" ./test/Makefile.am
+          RULE="vlc_demux_dec_libfuzzer_LDADD"
+          FUZZ_LDFLAGS="vlc_demux_dec_libfuzzer_LDFLAGS=\${LIB_FUZZING_ENGINE}"
+          sed -i "s/${RULE}/${FUZZ_LDFLAGS}\n${RULE}/g" ./test/Makefile.am
+          ./bootstrap
+          ./configure --disable-lua \
+                      --disable-nls \
+                      --disable-shared \
+                      --enable-static \
+                      --enable-vlc=no \
+                      --disable-xcb \
+                      --disable-alsa \
+                      --disable-libva \
+                      --enable-bpg \
+                      --with-libfuzzer
+          make V=1 -j$(nproc)
+          cp ./test/vlc-demux-dec-libfuzzer $GITHUB_WORKSPACE/build/fuzz-targets/
+          python3 /tmp/src/generate_seeds.py fuzz-corpus
+          rm fuzz-corpus/dictionaries/sdp.dict || true
+          find fuzz-corpus/dictionaries -name "*dict" -exec cat {} \; -exec echo "" \; >> $GITHUB_WORKSPACE/build/fuzz-targets/vlc-demux-dec-libfuzzer.dict
+          sed -i 's/^\("[^"]*"\)[[:space:]]*#.*/\1/' $GITHUB_WORKSPACE/build/fuzz-targets/vlc-demux-dec-libfuzzer.dict
+          for i in fuzz-corpus/seeds/* fuzz-corpus/dictionaries/*.dict
+          do
+              target=`basename "$i" .dict`
+              outfile="$GITHUB_WORKSPACE/build/fuzz-targets/vlc-demux-dec-libfuzzer"
+              outfile_target="$outfile-$target"
+              if [ -f "$i" ]; then
+                  cp "$i" "${outfile_target}.dict"
+              else
+                  zip -jr "${outfile_target}_seed_corpus.zip" "$i"/*
+              fi
+              cp "$outfile" "$outfile_target"
+          done
+          echo -e "[libfuzzer]\ndetect_leaks=0" > $GITHUB_WORKSPACE/build/fuzz-targets/vlc-demux-dec-libfuzzer.options
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

@@ -1,0 +1,159 @@
+name: "Fuzz hdf5"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: hdf5
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            cmake \
+            libtool \
+            pkg-config \
+            zlib1g-dev
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/HDFGroup/hdf5 /tmp/src/hdf5
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/hdf5
+          export LDFLAGS="${CFLAGS}"
+          export CMAKE_C_FLAGS="${CC} ${CFLAGS}"
+          export CMAKE_CXX_FLAGS="${CXX} ${CXXFLAGS}"
+          mkdir build-dir
+          cd build-dir
+          cmake -G "Unix Makefiles" \
+              -DCMAKE_BUILD_TYPE:STRING=Release \
+              -DBUILD_SHARED_LIBS:BOOL=OFF \
+              -DBUILD_TESTING:BOOL=OFF \
+              -DCMAKE_VERBOSE_MAKEFILES:BOOL=ON \
+              -DHDF5_BUILD_EXAMPLES:BOOL=OFF \
+              -DHDF5_BUILD_TOOLS:BOOL=OFF \
+              -DHDF5_ENABLE_SANITIZERS:BOOL=ON \
+              -DHDF5_ENABLE_Z_LIB_SUPPORT:BOOL=ON \
+              ..
+          cmake --build . --verbose --config Release -j$(nproc)
+          cd /tmp/src/hdf5
+          $CC $CFLAGS  -std=c99 -c \
+            -I/src/hdf5/src -I/src/hdf5/build-dir/src -I./src/H5FDsubfiling/ \
+            /tmp/src/h5_read_fuzzer.c
+          $CXX $CXXFLAGS $LIB_FUZZING_ENGINE h5_read_fuzzer.o ./build-dir/bin/libhdf5.a -lz -o $GITHUB_WORKSPACE/build/fuzz-targets/h5_read_fuzzer
+          $CC $CFLAGS  -std=c99 -c \
+            -I/src/hdf5/src -I/src/hdf5/build-dir/src -I./src/H5FDsubfiling/ \
+            /tmp/src/h5_extended_fuzzer.c
+          $CXX $CXXFLAGS $LIB_FUZZING_ENGINE h5_extended_fuzzer.o ./build-dir/bin/libhdf5.a -lz -o $GITHUB_WORKSPACE/build/fuzz-targets/h5_extended_fuzzer
+          zip -j $GITHUB_WORKSPACE/build/fuzz-targets/h5_extended_fuzzer_seed_corpus.zip /tmp/src/hdf5/test/testfiles/*.h5
+          mkdir /tmp/src/hdf5/build-test
+          cd /tmp/src/hdf5/build-test
+          cmake -DCMAKE_BUILD_TYPE:STRING=Release -DBUILD_TESTING:BOOL=ON ..
+          cmake --build . --verbose --config Release -j$(nproc)
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

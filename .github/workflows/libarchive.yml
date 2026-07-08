@@ -1,0 +1,172 @@
+name: "Fuzz libarchive"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: libarchive
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            default-jdk \
+            genisoimage \
+            jlha-utils \
+            lcab \
+            libacl1-dev \
+            libattr1-dev \
+            libbz2-dev \
+            liblz4-dev \
+            liblz4-tool \
+            liblzma-dev \
+            liblzo2-dev \
+            libssl-dev \
+            libtool \
+            libz-dev \
+            lrzip \
+            lzop \
+            pkg-config \
+            rar \
+            sharutils \
+            zstd
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/libarchive/libarchive.git /tmp/src/libarchive
+          git clone --depth 1 https://gitlab.gnome.org/GNOME/libxml2.git /tmp/src/libxml2
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src
+          export FUZZ_INTROSPECTOR_CONFIG=/tmp/src/fuzz_introspector_exclusion.config
+          cat > $FUZZ_INTROSPECTOR_CONFIG <<EOF
+          FILES_TO_AVOID
+          libxml2
+          EOF
+          DEPS=/deps
+          cd /tmp/src/libarchive
+          mkdir build2
+          cd build2
+          cmake -DDONT_FAIL_ON_CRC_ERROR=ON -DENABLE_WERROR=OFF ../
+          make -j$(nproc)
+          cp /tmp/src/libarchive/contrib/oss-fuzz/corpus.zip\
+                  $GITHUB_WORKSPACE/build/fuzz-targets/libarchive_fuzzer_seed_corpus.zip
+          $CXX $CXXFLAGS -I../libarchive \
+              /tmp/src/libarchive_fuzzer.cc -o $GITHUB_WORKSPACE/build/fuzz-targets/libarchive_fuzzer \
+              $LIB_FUZZING_ENGINE ./libarchive/libarchive.a \
+              -Wl,-Bstatic -llzo2 -Wl,-Bdynamic -lcrypto -lacl -llzma -llz4 -lbz2 -lz ${DEPS}/libxml2.a
+          cd /tmp/src
+          mkdir ./uudecoded
+          find /tmp/src/libarchive/ -type f -name "test_extract.*.uu" -print0 | xargs -0 -I % cp -f % ./uudecoded/
+          cd ./uudecoded
+          find ./ -name "*.uu" -exec uudecode {} \;
+          cd ../
+          rm -f ./uudecoded/*.uu
+          zip -jr $GITHUB_WORKSPACE/build/fuzz-targets/libarchive_fuzzer_seed_corpus.zip ./uudecoded/*
+          git clone --depth=1 https://github.com/corkami/pocs
+          find ./pocs/ -type f -print0 | xargs -0 -I % zip -jr $GITHUB_WORKSPACE/build/fuzz-targets/libarchive_fuzzer_seed_corpus.zip %
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

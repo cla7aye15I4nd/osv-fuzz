@@ -1,0 +1,163 @@
+name: "Fuzz haproxy"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: haproxy
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            libpcre2-dev \
+            zlib1g-dev
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/haproxy/haproxy /tmp/src/haproxy
+          git clone --depth 1 https://code.vinyl-cache.org/vtest/VTest2 /tmp/src/VTest2
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/haproxy
+          export ORIG_CFLAGS=${CFLAGS}
+          cd /tmp/src/haproxy
+          sed 's/COPTS += $(DEBUG) $(OPTIONS_CFLAGS) $(CFLAGS) $(ADDINC)/COPTS += $(DEBUG) $(OPTIONS_CFLAGS) $(CFLAGS) $(ADDINC) ${ORIG_CFLAGS}/g' -i Makefile
+          sed 's/LDOPTS = $(TARGET_LDFLAGS) $(OPTIONS_LDFLAGS) $(ADDLIB)/LDOPTS = $(TARGET_LDFLAGS) $(OPTIONS_LDFLAGS) $(ADDLIB) ${CXXFLAGS}/g' -i Makefile
+          make TARGET=generic CC=${CC} LD=${CXX} 
+          cd /src/haproxy
+          sed 's/int main(int argc/int main2(int argc/g' -i ./src/haproxy.c
+          sed 's/dladdr(main,/dladdr(main2,/g' -i ./src/tools.c
+          sed 's/(void*)main/(void*)main2/g' -i ./src/tools.c
+          SETTINGS="-Iinclude -g -DUSE_POLL -DUSE_TPROXY -DCONFIG_HAPROXY_VERSION=\"\" -DCONFIG_HAPROXY_DATE=\"\""
+          $CC $CFLAGS $SETTINGS -c -o ./src/haproxy.o ./src/haproxy.c
+          ar cr libhaproxy.a ./src/*.o
+          for fuzzer in hpack_decode cfg_parser h1_parse h1_htx http; do
+            cp /tmp/src/fuzz_${fuzzer}.c .
+            $CC $CFLAGS $SETTINGS -c fuzz_${fuzzer}.c  -o fuzz_${fuzzer}.o
+            $CXX -g $CXXFLAGS $LIB_FUZZING_ENGINE  fuzz_${fuzzer}.o libhaproxy.a -o $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_${fuzzer}
+          done
+          cp /tmp/src/*.dict $GITHUB_WORKSPACE/build/fuzz-targets/
+          mkdir -p "/tmp/work/h1_seeds"
+          printf '\x00GET / HTTP/1.1\r\nHost: example.com\r\n\r\n' > "/tmp/work/h1_seeds/get_simple"
+          printf '\x00POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 13\r\nContent-Type: application/json\r\n\r\n{"key":"val"}' > "/tmp/work/h1_seeds/post_cl"
+          printf '\x00POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n' > "/tmp/work/h1_seeds/post_chunked"
+          printf '\x00GET /page HTTP/1.1\r\nHost: example.com\r\nAccept: text/html\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\nCookie: s=abc\r\nUser-Agent: Mozilla/5.0\r\nX-Forwarded-For: 10.0.0.1\r\n\r\n' > "/tmp/work/h1_seeds/get_multi"
+          printf '\x00GET /old HTTP/1.0\r\nHost: example.com\r\n\r\n' > "/tmp/work/h1_seeds/get_http10"
+          printf '\x00GET /ws HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n' > "/tmp/work/h1_seeds/websocket"
+          printf '\x00CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n' > "/tmp/work/h1_seeds/connect"
+          printf '\x00HEAD / HTTP/1.1\r\nHost: example.com\r\n\r\n' > "/tmp/work/h1_seeds/head"
+          printf '\x00OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n' > "/tmp/work/h1_seeds/options"
+          printf '\x01HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello' > "/tmp/work/h1_seeds/resp_200"
+          printf '\x01HTTP/1.1 301 Moved Permanently\r\nLocation: https://example.com/\r\nContent-Length: 0\r\n\r\n' > "/tmp/work/h1_seeds/resp_301"
+          printf '\x01HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\na\r\n0123456789\r\n0\r\n\r\n' > "/tmp/work/h1_seeds/resp_chunked"
+          printf '\x01HTTP/1.0 200 OK\r\nConnection: close\r\n\r\n<html></html>' > "/tmp/work/h1_seeds/resp_connclose"
+          printf '\x01HTTP/1.1 100 Continue\r\n\r\n' > "/tmp/work/h1_seeds/resp_100"
+          printf '\x01HTTP/1.1 204 No Content\r\n\r\n' > "/tmp/work/h1_seeds/resp_204"
+          zip -j "$GITHUB_WORKSPACE/build/fuzz-targets/fuzz_h1_parse_seed_corpus.zip" "/tmp/work"/h1_seeds/*
+          cd /tmp/src/VTest2
+          make vtest
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

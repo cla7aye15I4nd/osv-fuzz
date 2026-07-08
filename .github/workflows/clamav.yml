@@ -1,0 +1,175 @@
+name: "Fuzz clamav"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: clamav
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            bison \
+            flex \
+            pkg-config \
+            python3-dev
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/Cisco-Talos/clamav-mussels-cookbook.git /tmp/src/clamav-mussels-cookbook
+          git clone --depth 1 https://github.com/Cisco-Talos/clamav.git /tmp/src/clamav
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/clamav
+          set -ex
+          export GIT_DISCOVERY_ACROSS_FILESYSTEM=1
+          rm -rf /tmp/src/build
+          mkdir -p /tmp/src/build
+          cd /tmp/src/build
+          export CLAMAV_DEPENDENCIES=/mussels/install
+          cmake /tmp/src/clamav \
+              -DENABLE_FUZZ=ON                                                   \
+              -DHAVE_MMAP=OFF                                                    \
+              -DJSONC_INCLUDE_DIR="$CLAMAV_DEPENDENCIES/include/json-c"          \
+              -DJSONC_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libjson-c.a"             \
+              -DENABLE_JSON_SHARED=OFF                                           \
+              -DBZIP2_INCLUDE_DIR="$CLAMAV_DEPENDENCIES/include"                 \
+              -DBZIP2_LIBRARY_RELEASE="$CLAMAV_DEPENDENCIES/lib/libbz2.a"        \
+              -DOPENSSL_ROOT_DIR="$CLAMAV_DEPENDENCIES"                          \
+              -DOPENSSL_INCLUDE_DIR="$CLAMAV_DEPENDENCIES/include"               \
+              -DOPENSSL_CRYPTO_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libcrypto.a"    \
+              -DOPENSSL_SSL_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libssl.a"          \
+              -DZLIB_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libssl.a"                 \
+              -DLIBXML2_INCLUDE_DIR="$CLAMAV_DEPENDENCIES/include/libxml2"       \
+              -DLIBXML2_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libxml2.a"             \
+              -DPCRE2_INCLUDE_DIR="$CLAMAV_DEPENDENCIES/include"                 \
+              -DPCRE2_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libpcre2-8.a"            \
+              -DZLIB_INCLUDE_DIR="$CLAMAV_DEPENDENCIES/include"                  \
+              -DZLIB_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libz.a"                   \
+              -DCMAKE_INSTALL_PREFIX="install"
+          make -j$(nproc)
+          cp ./fuzz/clamav_* $GITHUB_WORKSPACE/build/fuzz-targets/.
+          mkdir /tmp/src/all-scantype-seeds
+          git clone --depth 1 https://github.com/Cisco-Talos/clamav-fuzz-corpus.git /tmp/src/clamav-fuzz-corpus
+          for type in ARCHIVE MAIL OLE2 PDF HTML PE ELF SWF XMLDOCS HWP3; do
+              zip $GITHUB_WORKSPACE/build/fuzz-targets/clamav_scanfile_${type}_fuzzer_seed_corpus.zip /tmp/src/clamav-fuzz-corpus/scantype/${type}/*
+              zip $GITHUB_WORKSPACE/build/fuzz-targets/clamav_scanmap_${type}_fuzzer_seed_corpus.zip /tmp/src/clamav-fuzz-corpus/scantype/${type}/*
+              cp /tmp/src/clamav-fuzz-corpus/scantype/${type}.dict $GITHUB_WORKSPACE/build/fuzz-targets/clamav_scanfile_${type}_fuzzer.dict 2>/dev/null || :
+              cp /tmp/src/clamav-fuzz-corpus/scantype/${type}.dict $GITHUB_WORKSPACE/build/fuzz-targets/clamav_scanmap_${type}_fuzzer.dict 2>/dev/null || :
+              cp /tmp/src/clamav-fuzz-corpus/scantype/${type}/* /tmp/src/all-scantype-seeds/
+          done
+          git clone --depth=1 https://github.com/corkami/pocs
+          find ./pocs/ -type f -print0 | xargs -0 -I % mv -f % /tmp/src/all-scantype-seeds/
+          cp /tmp/src/clamav-fuzz-corpus/scantype/other/* /tmp/src/all-scantype-seeds/
+          zip $GITHUB_WORKSPACE/build/fuzz-targets/clamav_scanfile_fuzzer_seed_corpus.zip /tmp/src/all-scantype-seeds/*
+          zip $GITHUB_WORKSPACE/build/fuzz-targets/clamav_scanmap_fuzzer_seed_corpus.zip /tmp/src/all-scantype-seeds/*
+          rm -r /tmp/src/all-scantype-seeds
+          for type in CDB CFG CRB FP FTM HDB HSB IDB IGN IGN2 LDB MDB MSB NDB PDB WDB YARA; do
+              zip $GITHUB_WORKSPACE/build/fuzz-targets/clamav_dbload_${type}_fuzzer_seed_corpus.zip /tmp/src/clamav-fuzz-corpus/database/${type}/*
+              cp /tmp/src/clamav-fuzz-corpus/database/${type}.dict $GITHUB_WORKSPACE/build/fuzz-targets/clamav_dbload_${type}_fuzzer.dict 2>/dev/null || :
+          done
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

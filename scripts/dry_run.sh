@@ -40,6 +40,7 @@ for binary in "$FUZZ_DIR"/*; do
         if [ $exit_code -ne 0 ] && [ $exit_code -ne 124 ]; then
             echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
             mv "$RESULTS_DIR/.stderr_tmp" "$result_file"
+            cp "$seed" "$RESULTS_DIR/${bname}_${sname}.bin"
             crash_count=$((crash_count + 1))
         else
             rm -f "$RESULTS_DIR/.stderr_tmp"

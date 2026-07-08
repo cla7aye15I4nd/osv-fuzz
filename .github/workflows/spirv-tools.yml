@@ -1,0 +1,208 @@
+name: "Fuzz spirv-tools"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: spirv-tools
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            libtool \
+            ninja-build
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Tools.git /tmp/src/spirv-tools
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/spirv-tools
+          SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd )"
+          [ -d external/abseil_cpp ] || git clone https://github.com/abseil/abseil-cpp external/abseil_cpp --depth=1
+          [ -d external/re2 ] || git clone https://github.com/google/re2 external/re2 --depth=1
+          [ -d external/effcee ] || git clone https://github.com/google/effcee external/effcee --depth=1
+          [ -d external/googletest ] || git clone https://github.com/google/googletest external/googletest --depth=1
+          [ -d external/spirv-headers ] || git clone https://github.com/KhronosGroup/SPIRV-Headers external/spirv-headers --depth=1
+          [ -d external/protobuf ] || git clone https://github.com/protocolbuffers/protobuf   external/protobuf      --branch v3.13.0.1
+          [ -d build ] || mkdir build
+          pushd build
+          CMAKE_ARGS="-DSPIRV_BUILD_LIBFUZZER_TARGETS=ON -DSPIRV_LIB_FUZZING_ENGINE_LINK_OPTIONS=$LIB_FUZZING_ENGINE"
+          if [ $SANITIZER == "undefined" ];
+          then
+            CMAKE_ARGS="${CMAKE_ARGS} -DENABLE_RTTI=ON"
+          fi
+          cmake -G Ninja .. ${CMAKE_ARGS}
+          ninja
+          SPIRV_BINARY_FUZZERS="spvtools_binary_parser_fuzzer\
+           spvtools_dis_fuzzer\
+           spvtools_opt_legalization_fuzzer\
+           spvtools_opt_performance_fuzzer\
+           spvtools_opt_size_fuzzer\
+           spvtools_val_fuzzer"
+          SPIRV_ASSEMBLY_FUZZERS="spvtools_as_fuzzer"
+          for fuzzer in $SPIRV_BINARY_FUZZERS $SPIRV_ASSEMBLY_FUZZERS
+          do
+            cp test/fuzzers/$fuzzer $GITHUB_WORKSPACE/build/fuzz-targets
+          done
+          popd
+          if [ -f do-not-build-corpus ]; then
+            echo "Stopping before building fuzzing corpus: File $(pwd)/do-not-build-corpus exists"
+            exit 0
+          fi
+          [ -d out/standard-build ] || mkdir -p out/standard-build
+          pushd out/standard-build
+          CFLAGS_SAVE="$CFLAGS"
+          CXXFLAGS_SAVE="$CXXFLAGS"
+          unset CFLAGS
+          unset CXXFLAGS
+          export AFL_NOOPT=1
+          cmake -G Ninja ../.. ${CMAKE_ARGS}
+          ninja spirv-as
+          export CFLAGS="${CFLAGS_SAVE}"
+          export CXXFLAGS="${CXXFLAGS_SAVE}"
+          unset AFL_NOOPT
+          popd
+          function make_empty_dir() {
+            if [ -d "$@" ]; then
+              rm -rf "$@"/*
+              rm -rf "$@"/.*
+            else
+              mkdir -p "$@"
+            fi
+          }
+          make_empty_dir dawn
+          git clone https://dawn.googlesource.com/dawn --depth=1
+          make_empty_dir /tmp/work/tint-binary-corpus
+          python3 $SCRIPT_DIR/generate_spirv_corpus.py dawn/test/tint /tmp/work/tint-binary-corpus out/standard-build/tools/spirv-as
+          make_empty_dir /tmp/work/spirv-binary-corpus-hashed-names
+          tint_test_cases=`ls /tmp/work/tint-binary-corpus/*.spv`
+          spirv_tools_test_cases=`find test/fuzzers/corpora -name "*.spv"`
+          for f in $tint_test_cases $spirv_tools_test_cases
+          do
+            hashed_name=$(sha1sum "$f" | awk '{print $1}')
+            cp $f /tmp/work/spirv-binary-corpus-hashed-names/$hashed_name
+          done
+          zip -j "/tmp/work/spirv_binary_seed_corpus.zip" "/tmp/work/spirv-binary-corpus-hashed-names"/*
+          for fuzzer in $SPIRV_BINARY_FUZZERS
+          do
+            cp "/tmp/work/spirv_binary_seed_corpus.zip" "$GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer}_seed_corpus.zip"
+          done
+          make_empty_dir /tmp/work/spirv-assembly-corpus-hashed-names
+          for f in `find dawn/test/tint -name "*.spvasm"`
+          do
+            hashed_name=$(sha1sum "$f" | awk '{print $1}')
+            cp $f /tmp/work/spirv-assembly-corpus-hashed-names/$hashed_name
+          done
+          zip -j "/tmp/work/spirv_assembly_seed_corpus.zip" "/tmp/work/spirv-assembly-corpus-hashed-names"/*
+          for fuzzer in $SPIRV_ASSEMBLY_FUZZERS
+          do
+            cp "/tmp/work/spirv_assembly_seed_corpus.zip" "$GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer}_seed_corpus.zip"
+          done
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

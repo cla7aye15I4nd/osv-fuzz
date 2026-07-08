@@ -1,0 +1,180 @@
+name: "Fuzz libvpx"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: libvpx
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            yasm
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://chromium.googlesource.com/webm/libvpx /tmp/src/libvpx
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/libvpx
+          build_dir=/tmp/work/build
+          rm -rf ${build_dir}
+          mkdir -p ${build_dir}
+          pushd ${build_dir}
+          if [[ $CFLAGS = *sanitize=memory* ]]; then
+            extra_c_flags='-DVPX_MAX_ALLOCABLE_MEMORY=536870912'
+            extra_configure_flags=(--disable-x86-asm)
+          else
+            extra_c_flags='-DVPX_MAX_ALLOCABLE_MEMORY=1073741824'
+            extra_configure_flags=()
+          fi
+          LDFLAGS="$CXXFLAGS" LD=$CXX /tmp/src/libvpx/configure \
+              --enable-vp9-highbitdepth \
+              --disable-unit-tests \
+              --disable-examples \
+              --size-limit=12288x12288 \
+              --extra-cflags="${extra_c_flags}" \
+              --disable-webm-io \
+              --enable-debug \
+              --enable-vp8-encoder \
+              --enable-vp9-encoder \
+              "${extra_configure_flags[@]}"
+          make -j$(nproc) all
+          popd
+          fuzzer_src_name=vpx_dec_fuzzer
+          fuzzer_decoders=( 'vp9' 'vp8' )
+          for decoder in "${fuzzer_decoders[@]}"; do
+            fuzzer_name=${fuzzer_src_name}"_"${decoder}
+            $CXX $CXXFLAGS -std=c++11 \
+              -DDECODER=${decoder} \
+              -I/tmp/src/libvpx \
+              -I${build_dir} \
+              -Wl,--start-group \
+              $LIB_FUZZING_ENGINE \
+              /tmp/src/libvpx/examples/${fuzzer_src_name}.cc -o $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer_name} \
+              ${build_dir}/libvpx.a \
+              -Wl,--end-group
+            cp /tmp/src/vpx_fuzzer_seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer_name}_seed_corpus.zip
+            cp /tmp/src/vpx_dec_fuzzer.dict $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer_name}.dict
+            cp $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer_name} $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer_name}_nalloc
+          done
+          fuzzer_src_name=vpx_enc_fuzzer
+          fuzzer_encoders=( 'vp9' 'vp8' )
+          for encoder in "${fuzzer_encoders[@]}"; do
+            fuzzer_name=${fuzzer_src_name}"_"${encoder}
+            $CXX $CXXFLAGS -std=c++11 \
+              -DENCODER=${encoder} \
+              -I/tmp/src/libvpx \
+              -I${build_dir} \
+              -Wl,--start-group \
+              $LIB_FUZZING_ENGINE \
+              /tmp/src/libvpx/examples/${fuzzer_src_name}.cc -o $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer_name} \
+              ${build_dir}/libvpx.a \
+              -Wl,--end-group
+            cp $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer_name} $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer_name}_nalloc
+          done
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

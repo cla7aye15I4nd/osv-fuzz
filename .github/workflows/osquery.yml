@@ -1,0 +1,162 @@
+name: "Fuzz osquery"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: osquery
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            bison \
+            flex \
+            libssl-dev \
+            libunwind-dev \
+            lsb-release \
+            python \
+            xz-utils
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/osquery/osquery /tmp/src/osquery
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/osquery
+          PROJECT=osquery
+          ln -s /usr/include/locale.h /usr/include/xlocale.h
+          ( cd / &&\
+            mv "/tmp/src/${PROJECT}" "/tmp/src/${PROJECT}-dev" &&\
+            mv "/tmp/src/${PROJECT}-dev" "/tmp/src/${PROJECT}" )
+          pushd "/tmp/src/${PROJECT}"
+          mkdir build && pushd build
+          cmake \
+            -DOSQUERY_VERSION:string=0.0.0-fuzz \
+            -DOSQUERY_ENABLE_ADDRESS_SANITIZER:BOOL=ON \
+            -DOSQUERY_BUILD_FUZZERS:BOOL=ON \
+            -DOSQUERY_BUILD_AWS:BOOL=OFF \
+            -DOSQUERY_BUILD_EXPERIMENTS:BOOL=OFF \
+            ..
+          cmake \
+            "-DCMAKE_EXE_LINKER_FLAGS=${LIB_FUZZING_ENGINE} -Wl,-rpath,'\$ORIGIN/lib'" \
+            ..
+          sed -i 's/AUDIT_FILTER_EXCLUDE/AUDIT_FILTER_EXCLUDE1/g' /src/osquery/libraries/cmake/source/libaudit/src/lib/libaudit.h
+          cmake --build . -j$(nproc) --target osqueryfuzz-config
+          cmake --build . -j$(nproc) --target osqueryfuzz-sqlquery
+          find . -type f -name '*.o' -delete
+          rm -rf "/tmp/src/${PROJECT}/libraries/cmake/source/libudev/src/test"
+          rm -rf libs/src/patched-source/libudev/src/test
+          mkdir -p "$GITHUB_WORKSPACE/build/fuzz-targets/lib"
+          cp /usr/lib/x86_64-linux-gnu/libunwind.so.8 "$GITHUB_WORKSPACE/build/fuzz-targets/lib"
+          cp osquery/main/harnesses/osqueryfuzz-config "$GITHUB_WORKSPACE/build/fuzz-targets/osqueryfuzz-config"
+          cp osquery/main/harnesses/osqueryfuzz-sqlquery "$GITHUB_WORKSPACE/build/fuzz-targets/osqueryfuzz-sqlquery"
+          popd
+          tools/harnesses/osqueryfuzz_config_corpus.sh "$GITHUB_WORKSPACE/build/fuzz-targets/osqueryfuzz-config_seed_corpus.zip"
+          tools/harnesses/osqueryfuzz_config_dict.sh "$GITHUB_WORKSPACE/build/fuzz-targets/osqueryfuzz-config.dict"
+          tools/harnesses/osqueryfuzz_sqlquery_corpus.sh "$GITHUB_WORKSPACE/build/fuzz-targets/osqueryfuzz-sqlquery_seed_corpus.zip"
+          cp tools/harnesses/osqueryfuzz_sqlquery.dict "$GITHUB_WORKSPACE/build/fuzz-targets/osqueryfuzz-sqlquery.dict"
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

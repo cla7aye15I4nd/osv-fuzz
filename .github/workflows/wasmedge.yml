@@ -1,0 +1,165 @@
+name: "Fuzz wasmedge"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: wasmedge
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            dpkg-dev \
+            liblld-12-dev \
+            llvm-12-dev \
+            ninja-build
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/WasmEdge/WasmEdge.git /tmp/src/WasmEdge
+          git clone --depth 1 https://github.com/second-state/WasmEdge-unittest.git /tmp/src/WasmEdge-unittest
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src
+          export CXXFLAGS="${CXXFLAGS} -Wno-error=invalid-specialization"
+          cd "/tmp/src/WasmEdge"
+          sed -ie 's@core lto native@core native@' cmake/Helper.cmake
+          cmake -GNinja -Bbuild -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DWASMEDGE_FORCE_DISABLE_LTO=ON \
+            -DWASMEDGE_BUILD_FUZZING=ON \
+            -DWASMEDGE_BUILD_TOOLS=OFF \
+            -DWASMEDGE_BUILD_TESTS=OFF \
+            -DLIB_FUZZING_ENGINE="$LIB_FUZZING_ENGINE" \
+            -DCMAKE_C_COMPILER_AR="$(command -v llvm-ar)" \
+            -DCMAKE_C_COMPILER_RANLIB="$(command -v llvm-ranlib)" \
+            -DCMAKE_CXX_COMPILER_AR="$(command -v llvm-ar)" \
+            -DCMAKE_CXX_COMPILER_RANLIB="$(command -v llvm-ranlib)" \
+            -DLLVM_DIR="/usr/lib/llvm-12/lib/cmake/llvm" \
+            -DLLD_DIR="/usr/lib/llvm-12/lib/cmake/lld" \
+            .
+          ninja -C build
+          cp -a build/lib/api/libwasmedge*.so* build/tools/fuzz/wasmedge-fuzz* "$GITHUB_WORKSPACE/build/fuzz-targets"/
+          find "$GITHUB_WORKSPACE/build/fuzz-targets" -maxdepth 1 -type f -name 'libwasmedge*.so*' -exec patchelf --set-rpath '$ORIGIN' {} +
+          cd utils/corpus/po
+          zip -9 "$GITHUB_WORKSPACE/build/fuzz-targets/wasmedge-fuzzpo_seed_corpus.zip" -R '*.txt'
+          cd -
+          cd "/tmp/src/WasmEdge-unittest"
+          zip -9 "$GITHUB_WORKSPACE/build/fuzz-targets/wasmedge-fuzztool_seed_corpus.zip" -R '*.wasm'
+          cd -
+          seeddir="$(mktemp -d)"
+          printf '\x00\x61\x73\x6d\x0d\x00\x01\x00' > "$seeddir/empty_component.wasm"
+          (cd "$seeddir" && zip -9 "$GITHUB_WORKSPACE/build/fuzz-targets/wasmedge-fuzzcomponent_seed_corpus.zip" empty_component.wasm)
+          rm -rf "$seeddir"
+          for i in build/tools/fuzz/wasmedge-fuzz*; do
+            j="$(basename "$i")"
+            patchelf --set-rpath \$ORIGIN "$GITHUB_WORKSPACE/build/fuzz-targets/${j}"
+          done
+          for i in libLLVM-12.so.1 libedit.so.2 libbsd.so.0; do
+            cp "/usr/lib/x86_64-linux-gnu/${i}" "$GITHUB_WORKSPACE/build/fuzz-targets/"
+            patchelf --set-rpath \$ORIGIN "$GITHUB_WORKSPACE/build/fuzz-targets/${i}"
+          done
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

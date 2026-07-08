@@ -1,0 +1,176 @@
+name: "Fuzz rnp"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: rnp
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            cmake \
+            libbz2-dev \
+            libjson-c-dev \
+            libtool \
+            patchelf \
+            python \
+            zlib1g-dev
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/rnpgp/rnp.git /tmp/src/rnp
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src
+          cd "/tmp/src"
+          wget -qO- https://botan.randombit.net/releases/Botan-3.4.0.tar.xz | tar xJ
+          cd Botan-3.4.0
+          BOTAN_MODULES=$(<"/tmp/src/rnp/ci/botan3-pqc-modules" tr '\n' ',')
+          ./configure.py --prefix=/usr --cc-bin="$CXX" --cc-abi-flags="$CXXFLAGS" \
+                         --unsafe-fuzzer-mode \
+                         --with-fuzzer-lib='FuzzingEngine' \
+                         --minimized-build \
+                         --disable-modules=locking_allocator \
+                         --enable-modules="$BOTAN_MODULES"
+          make "-j$(nproc)"
+          make install
+          cd "/tmp/src"
+          mkdir fuzzing_corpus
+          cd "/tmp/src/rnp/src/tests/data"
+          find . -type f -print0 | xargs -0 -I bob -- cp bob "/tmp/src/fuzzing_corpus/"
+          cd "/tmp/src"
+          mkdir rnp-build
+          cd rnp-build
+          cmake \
+              -DENABLE_SANITIZERS=0 \
+              -DENABLE_FUZZERS=1 \
+              -DCMAKE_C_COMPILER="$CC" \
+              -DCMAKE_CXX_COMPILER="$CXX" \
+              -DCMAKE_C_LINK_EXECUTABLE="$CXX <FLAGS> <CMAKE_C_LINK_FLAGS> <LINK_FLAGS> <OBJECTS>  -o <TARGET> <LINK_LIBRARIES>" \
+              -DCMAKE_INSTALL_PREFIX=/usr \
+              -DBUILD_SHARED_LIBS=on \
+              -DBUILD_TESTING=off \
+              -DENABLE_PQC=on \
+              -DENABLE_CRYPTO_REFRESH=on \
+              -DCMAKE_VERBOSE_MAKEFILE:BOOL=ON \
+              "/tmp/src/rnp"
+          make "-j$(nproc)"
+          FUZZERS=$(find src/fuzzing -maxdepth 1 -type f -name "fuzz_*" -exec basename {} \;)
+          printf "Detected fuzzers: \n%s\n" "$FUZZERS"
+          for f in $FUZZERS; do
+              cp "src/fuzzing/$f" "$GITHUB_WORKSPACE/build/fuzz-targets/"
+              patchelf --set-rpath "\$ORIGIN/lib" "$GITHUB_WORKSPACE/build/fuzz-targets/$f" || echo "patchelf failed with $?, ignoring."
+              zip -j -r "$GITHUB_WORKSPACE/build/fuzz-targets/${f}_seed_corpus.zip" "/tmp/src/fuzzing_corpus/"
+          done
+          mkdir -p "$GITHUB_WORKSPACE/build/fuzz-targets/lib"
+          cp src/lib/librnp.so.0 "$GITHUB_WORKSPACE/build/fuzz-targets/lib/"
+          cp /usr/lib/libbotan-3.so.* "$GITHUB_WORKSPACE/build/fuzz-targets/lib/"
+          cp /lib/x86_64-linux-gnu/libjson-c.so.* "$GITHUB_WORKSPACE/build/fuzz-targets/lib/"
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

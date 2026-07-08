@@ -1,0 +1,189 @@
+name: "Fuzz open62541"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: open62541
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            cmake \
+            libmbedtls-dev \
+            python3-six
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/open62541/open62541.git /tmp/src/-bmaster
+          git clone --depth 1 https://github.com/open62541/open62541.git /tmp/tmp/src/open62541_15
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/open62541
+          function build_open62541_fuzzers() {
+              local SRC_DIR=$1
+              local SUFFIX=$2
+              local WORK_DIR="/tmp/work/open62541${SUFFIX}"
+              mkdir -p "/tmp/work_DIR"
+              cd "/tmp/work_DIR"
+              local OUT_DIR="$GITHUB_WORKSPACE/build/fuzz-targets"
+              if [[ -n "$SUFFIX" ]]; then
+                  OUT_DIR="/tmp/work/out${SUFFIX}"
+                  mkdir -p "$GITHUB_WORKSPACE/build/fuzz-targets_DIR"
+              fi
+              OUT="$GITHUB_WORKSPACE/build/fuzz-targets_DIR" cmake \
+                  -DCMAKE_BUILD_TYPE=Debug \
+                  -DUA_ENABLE_AMALGAMATION=OFF \
+                  -DPYTHON_EXECUTABLE:FILEPATH=/usr/bin/python3 \
+                  -DBUILD_SHARED_LIBS=OFF \
+                  -DUA_BUILD_EXAMPLES=OFF \
+                  -DUA_LOGLEVEL=600 \
+                  -DUA_ENABLE_ENCRYPTION=ON \
+                  -DUA_BUILD_OSS_FUZZ=ON \
+                  "/tmp/src_DIR/"
+              make -j"$(nproc)"
+              if [[ -n "$SUFFIX" ]]; then
+                  for f in "$GITHUB_WORKSPACE/build/fuzz-targets_DIR"/*; do
+                      [[ -f "$f" && -x "$f" ]] || continue
+                      fname=$(basename "$f")
+                      cp "$f" "$GITHUB_WORKSPACE/build/fuzz-targets/${fname}${SUFFIX}"
+                  done
+              fi
+              fuzzerFiles=$(find "/tmp/src_DIR/tests/fuzz/" -maxdepth 1 -name "*.cc")
+              for F in $fuzzerFiles; do
+                  fuzzerName=$(basename "$F" .cc)
+                  corpusDir="/tmp/src_DIR/tests/fuzz/${fuzzerName}_corpus"
+                  if [[ -d "$corpusDir" ]]; then
+                      zip -jr "$GITHUB_WORKSPACE/build/fuzz-targets/${fuzzerName}${SUFFIX}_seed_corpus.zip" "$corpusDir/"
+                  fi
+              done
+              if [[ -f "$GITHUB_WORKSPACE/build/fuzz-targets/fuzz_binary_message${SUFFIX}_seed_corpus.zip" ]]; then
+                  cp "$GITHUB_WORKSPACE/build/fuzz-targets/fuzz_binary_message${SUFFIX}_seed_corpus.zip" \
+                     "$GITHUB_WORKSPACE/build/fuzz-targets/fuzz_tcp_message${SUFFIX}_seed_corpus.zip"
+              fi
+              for optFile in "/tmp/src_DIR/tests/fuzz/"*.options; do
+                  [[ -f "$optFile" ]] || continue
+                  base=$(basename "$optFile" .options)
+                  cp "$optFile" "$GITHUB_WORKSPACE/build/fuzz-targets/${base}${SUFFIX}.options"
+              done
+              for dictFile in "/tmp/src_DIR/tests/fuzz/"*.dict; do
+                  [[ -f "$dictFile" ]] || continue
+                  cp "$dictFile" "$GITHUB_WORKSPACE/build/fuzz-targets/"
+              done
+              local mdns_copy="/tmp/src_DIR/deps/mdnsd/tests/fuzz/oss-fuzz-copy.sh"
+              if [[ -f "$mdns_copy" ]]; then
+                  SRC="/tmp/src_DIR/deps" "$mdns_copy"
+              fi
+          }
+          build_open62541_fuzzers "/tmp/src/open62541" ""
+          if [[ "$SANITIZER" == introspector ]]; then
+              echo "Introspector mode: skipping 1.5 branch build."
+              exit 0
+          fi
+          build_open62541_fuzzers "/tmp/src/open62541_15" "_15"
+          echo "Built all fuzzer targets."
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

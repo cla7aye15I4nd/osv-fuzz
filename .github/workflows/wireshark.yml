@@ -1,0 +1,160 @@
+name: "Fuzz wireshark"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: wireshark
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            cmake \
+            flex \
+            libc-ares-dev \
+            libgcrypt20-dev \
+            libglib2.0-dev \
+            ninja-build
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://gitlab.com/wireshark/wireshark.git /tmp/src/wireshark
+          git clone --depth 1 https://bitbucket.org/jwzawadzki/wireshark-fuzzdb.git /tmp/src/wireshark-fuzzdb
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/wireshark
+          cd /tmp/src
+          tar -xJf /tmp/src/libxml2-2.12.10.tar.xz
+          cd libxml2-2.12.10
+          ./configure --disable-shared --enable-static --disable-ipv6 --without-python --without-zlib --without-lzma
+          make -j$(nproc)
+          make install
+          export LIBXML_CFLAGS="-I$(pwd)/include"
+          export LIBXML_LIBS="-L$(pwd) -lxml2"
+          export XML_CFLAGS="$LIBXML_CFLAGS"
+          export XML_LIBS="$LIBXML_LIBS"
+          cd /tmp/src/wireshark
+          WIRESHARK_BUILD_PATH="/tmp/work/build"
+          mkdir -p "$WIRESHARK_BUILD_PATH"
+          export SAMPLES_DIR="/tmp/work/samples"
+          mkdir -p "$SAMPLES_DIR"
+          cp -a /tmp/src/wireshark-fuzzdb/samples/* "$SAMPLES_DIR"
+          CMAKE_DEFINES="-DBUILD_fuzzshark=ON"
+          CMAKE_DEFINES="$CMAKE_DEFINES -DBUILD_SHARED_LIBS=OFF -DENABLE_PLUGINS=OFF"
+          CMAKE_DEFINES="$CMAKE_DEFINES -DENABLE_PCAP=OFF -DENABLE_GNUTLS=OFF"
+          CMAKE_DEFINES="$CMAKE_DEFINES -DBUILD_wireshark=OFF -DBUILD_stratoshark=OFF -DBUILD_sharkd=OFF"
+          cd "$WIRESHARK_BUILD_PATH"
+          cmake -GNinja \
+                -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX \
+                -DCMAKE_C_FLAGS="-Wno-error=fortify-source -Wno-error=missing-field-initializers $CFLAGS" -DCMAKE_CXX_FLAGS="-Wno-error=fortify-source -Wno-error=missing-field-initializers $CXXFLAGS" \
+                -DCMAKE_JOB_POOL_LINK=limited_link_pool \
+                -DCMAKE_JOBS_POOLS:STRING=limited_link_pool=2 \
+                -DENABLE_WERROR=OFF -DOSS_FUZZ=ON $CMAKE_DEFINES \
+                -DUSE_STATIC=ON /tmp/src/wireshark
+          ninja all-fuzzers -j$(expr $(nproc) / 4)
+          /tmp/src/wireshark/tools/oss-fuzzshark/build.sh all
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

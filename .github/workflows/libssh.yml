@@ -1,0 +1,179 @@
+name: "Fuzz libssh"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: libssh
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            cmake \
+            libcmocka-dev \
+            libcmocka0 \
+            libssl-dev \
+            zlib1g-dev
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://git.libssh.org/projects/libssh.git /tmp/src/libssh
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/libssh
+          BUILD=/tmp/work/build
+          mkdir -p $BUILD
+          SCP_FUZZER="/tmp/src/libssh/tests/fuzz/ssh_scp_fuzzer.c"
+          if [ -f "$SCP_FUZZER" ]; then
+              sed -i 's/^cleanup_thread:/cleanup_thread:\n    shutdown(socket_fds[0], SHUT_RDWR);\n    shutdown(socket_fds[1], SHUT_RDWR);/' "$SCP_FUZZER"
+          fi
+          pushd $BUILD
+          CFLAGS="$CFLAGS -Wno-error=declaration-after-statement"
+          cmake -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+              -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+              -DBUILD_SHARED_LIBS=OFF -DWITH_INSECURE_NONE=ON -DWITH_EXEC=OFF \
+              -DUNIT_TESTING=ON -DWITH_EXAMPLES=OFF /tmp/src/libssh
+          make "-j$(nproc)"
+          MOCK_SRC="/tmp/src/libssh/tests/fuzz/ssh_server_mock.c"
+          if [ -f "$MOCK_SRC" ]; then
+              $CC $CFLAGS -I/tmp/src/libssh/include/ -I/tmp/src/libssh/src/ -I$BUILD/ -I$BUILD/include/ \
+                  -c "$MOCK_SRC" -O0 -g
+          fi
+          CLIENT_MOCK_SRC="/tmp/src/libssh/tests/fuzz/ssh_client_mock.c"
+          if [ -f "$CLIENT_MOCK_SRC" ]; then
+              $CC $CFLAGS -I/tmp/src/libssh/include/ -I/tmp/src/libssh/src/ -I$BUILD/ -I$BUILD/include/ \
+                  -c "$CLIENT_MOCK_SRC" -O0 -g
+          fi
+          fuzzers=$(find /tmp/src/libssh/tests/fuzz/ -name "*_fuzzer.c")
+          for f in $fuzzers; do
+              fuzzerName=$(basename $f .c)
+              echo "Building fuzzer $fuzzerName"
+              $CC $CFLAGS -I/tmp/src/libssh/include/ -I/tmp/src/libssh/src/ -I$BUILD/ -I$BUILD/include/ \
+                  -c "$f" -O0 -g
+              if [ "$fuzzerName" = "ssh_scp_fuzzer" ] || [ "$fuzzerName" = "ssh_sftp_fuzzer" ]; then
+                  echo "Linking $fuzzerName with ssh_server_mock"
+                  $CXX $CXXFLAGS $fuzzerName.o ssh_server_mock.o \
+                      -o "$GITHUB_WORKSPACE/build/fuzz-targets/$fuzzerName" -O0 -g \
+                      $LIB_FUZZING_ENGINE ./src/libssh.a -Wl,-Bstatic -lcrypto -lz -Wl,-Bdynamic -lpthread
+              elif [ "$fuzzerName" = "ssh_sftpserver_fuzzer" ]; then
+                  echo "Linking $fuzzerName with ssh_client_mock"
+                  $CXX $CXXFLAGS $fuzzerName.o ssh_client_mock.o \
+                      -o "$GITHUB_WORKSPACE/build/fuzz-targets/$fuzzerName" -O0 -g \
+                      $LIB_FUZZING_ENGINE ./src/libssh.a -Wl,-Bstatic -lcrypto -lz -Wl,-Bdynamic -lpthread
+              else
+                  $CXX $CXXFLAGS $fuzzerName.o \
+                      -o "$GITHUB_WORKSPACE/build/fuzz-targets/$fuzzerName" -O0 -g \
+                      $LIB_FUZZING_ENGINE ./src/libssh.a -Wl,-Bstatic -lcrypto -lz -Wl,-Bdynamic
+              fi
+              if [ -d "/tmp/src/libssh/tests/fuzz/${fuzzerName}_corpus" ]; then
+                  zip -j $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzerName}_seed_corpus.zip /tmp/src/libssh/tests/fuzz/${fuzzerName}_corpus/*
+                  cp $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzerName}_seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzerName}_nalloc_seed_corpus.zip
+              fi
+              cp $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzerName} $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzerName}_nalloc
+          done
+          popd
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

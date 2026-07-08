@@ -1,0 +1,187 @@
+name: "Fuzz frr"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: frr
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            bison \
+            flex \
+            libc-ares-dev \
+            libcap-dev \
+            libelf-dev \
+            libjson-c-dev \
+            libpcre2-dev \
+            libpcre3-dev \
+            libprotobuf-c-dev \
+            libreadline-dev \
+            libsnmp-dev \
+            libsystemd-dev \
+            libtool \
+            pkg-config \
+            protobuf-c-compiler \
+            python3-dev \
+            python3-sphinx \
+            texinfo
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/FRRouting/frr /tmp/src/frr
+          git clone --depth 1 https://github.com/qlyoung/corpi /tmp/src/corpi
+          git clone --depth 1 https://github.com/pytest-dev/pytest /tmp/src/pytest
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/frr
+          python3 -m venv --system-site-packages /tmp/src/venv
+          source /tmp/src/venv/bin/activate
+          pip3 install pytest
+          function copy_lib
+              {
+              local fuzzer_path=$1
+              local lib=$2
+              cp $(ldd ${fuzzer_path} | grep "${lib}" | awk '{ print $3 }') $GITHUB_WORKSPACE/build/fuzz-targets/lib/ || true
+              }
+          mkdir -p $GITHUB_WORKSPACE/build/fuzz-targets/lib
+          (
+          cd /tmp/src/libyang
+          mkdir build; cd build
+          cmake -DBUILD_SHARED_LIBS=OFF -DENABLE_LYD_PRIV=ON -DCMAKE_INSTALL_PREFIX:PATH=/usr \
+              -D CMAKE_BUILD_TYPE:String="Release" ..
+          make -j$(nproc)
+          make install
+          )
+          export ASAN_OPTIONS=detect_leaks=0
+          export CFLAGS="${CFLAGS} -DFUZZING_OVERRIDE_LLVMFuzzerTestOneInput"
+          export CXXFLAGS="${CXXFLAGS} -DFUZZING_OVERRIDE_LLVMFuzzerTestOneInput"
+          ./bootstrap.sh
+          ./configure --enable-libfuzzer --enable-static --enable-static-bin --sbindir=/tmp/src/bin
+          make -j$(nproc)
+          make install
+          cp ./lib/.libs/libfrr.so.0 $GITHUB_WORKSPACE/build/fuzz-targets/lib/
+          cp /tmp/src/bin/bgpd $GITHUB_WORKSPACE/build/fuzz-targets/
+          cp /tmp/src/bin/ospfd $GITHUB_WORKSPACE/build/fuzz-targets/
+          cp /tmp/src/bin/pimd $GITHUB_WORKSPACE/build/fuzz-targets/
+          cp /tmp/src/bin/zebra $GITHUB_WORKSPACE/build/fuzz-targets/
+          cd /tmp/src/corpi
+          find . -type d -maxdepth 1 | while read i; do zip -j $GITHUB_WORKSPACE/build/fuzz-targets/"$i"_seed_corpus.zip "$i"/*; done
+          find $GITHUB_WORKSPACE/build/fuzz-targets -maxdepth 1 -type f -executable | while read i; do
+              grep "LLVMFuzzerTestOneInput" ${i} > /dev/null 2>&1 || continue
+              patchelf --set-rpath '$ORIGIN/lib' ${i}
+              copy_lib ${i} libpcre2
+              copy_lib ${i} libyang
+              copy_lib ${i} libelf
+              copy_lib ${i} libjson-c
+              copy_lib ${i} libprotobuf-c
+          done
+          patchelf --remove-needed libpcre2-8.so.0 $GITHUB_WORKSPACE/build/fuzz-targets/lib/libyang.so.2
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

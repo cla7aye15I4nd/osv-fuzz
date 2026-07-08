@@ -1,0 +1,160 @@
+name: "Fuzz readstat"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: readstat
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            gettext \
+            libtool \
+            zip \
+            zlib1g-dev
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/WizardMac/ReadStat /tmp/src/readstat
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/readstat
+          ./autogen.sh
+          ./configure --enable-static
+          make clean
+          make
+          make generate_corpus
+          ./generate_corpus
+          zip $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_format_dta_seed_corpus.zip ./fuzz/corpus/dta*/test-case-*
+          zip $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_format_por_seed_corpus.zip ./fuzz/corpus/por/test-case-*
+          zip $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_format_sav_seed_corpus.zip ./fuzz/corpus/sav*/test-case-* ./fuzz/corpus/zsav/test-case-*
+          zip $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_format_sas7bcat_seed_corpus.zip ./fuzz/corpus/sas7bcat/test-case-*
+          zip $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_format_sas7bdat_seed_corpus.zip ./fuzz/corpus/sas7bdat*/test-case-*
+          zip $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_format_xport_seed_corpus.zip ./fuzz/corpus/xpt*/test-case-*
+          cp ./fuzz/dict/fuzz_format_spss_commands.dict $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_format_spss_commands.dict
+          cp ./fuzz/dict/fuzz_format_stata_commands.dict $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_format_stata_commands.dict
+          cp ./fuzz/dict/fuzz_format_sas_commands.dict $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_format_sas_commands.dict
+          READSTAT_FUZZERS="
+              fuzz_compression_sav \
+              fuzz_grammar_spss_format \
+              fuzz_format_sas_commands \
+              fuzz_format_spss_commands \
+              fuzz_format_stata_dictionary \
+              fuzz_format_dta \
+              fuzz_format_por \
+              fuzz_format_sav \
+              fuzz_format_sas7bcat \
+              fuzz_format_sas7bdat \
+              fuzz_format_xport"
+          for fuzzer in $READSTAT_FUZZERS; do
+              make ${fuzzer}
+              cp ${fuzzer} $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer}
+          done
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

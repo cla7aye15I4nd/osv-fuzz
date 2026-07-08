@@ -1,0 +1,179 @@
+name: "Fuzz boringssl"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: boringssl
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            binutils \
+            cmake \
+            liblzma-dev \
+            libtool \
+            libz-dev \
+            ninja-build \
+            pkg-config
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://boringssl.googlesource.com/boringssl /tmp/src/boringssl
+          git clone --depth 1 https://github.com/google/fuzzing.git /tmp/src/fuzzing
+          git clone --depth 1 https://github.com/google/libprotobuf-mutator.git /tmp/src/libprotobuf-mutator
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src
+          mkdir -p /tmp/work/boringssl
+          cd /tmp/work/boringssl
+          CFLAGS="$CFLAGS -DBORINGSSL_UNSAFE_FUZZER_MODE"
+          CXXFLAGS="$CXXFLAGS -DBORINGSSL_UNSAFE_FUZZER_MODE"
+          CMAKE_DEFINES="-DBORINGSSL_ALLOW_CXX_RUNTIME=1"
+          if [[ $CFLAGS = *sanitize=memory* ]]
+          then
+            CMAKE_DEFINES+=" -DOPENSSL_NO_ASM=1"
+          fi
+          cmake -GNinja -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX \
+                -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+                $CMAKE_DEFINES /tmp/src/boringssl/
+          ninja
+          fuzzerFiles=$(find /tmp/src/boringssl/fuzz/ -name "*.cc")
+          find . -name "*.a"
+          for F in $fuzzerFiles; do
+            fuzzerName=$(basename $F .cc)
+            echo "Building fuzzer $fuzzerName"
+            $CXX $CXXFLAGS \
+                -D_BORINGSSL_LIBPKI_ -std=c++1z \
+                -o $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzerName} $LIB_FUZZING_ENGINE $F \
+                -I /tmp/src/boringssl/include ./libpki.a ./libssl.a  ./libcrypto.a
+            if [ -d "/tmp/src/boringssl/fuzz/${fuzzerName}_corpus" ]; then
+              zip -j $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzerName}_seed_corpus.zip /tmp/src/boringssl/fuzz/${fuzzerName}_corpus/*
+            fi
+          done
+          if [[ $CFLAGS != *sanitize=memory* ]]; then
+            fuzzerLPMFiles=$(find /tmp/src/ -maxdepth 1 -name "*.cc")
+            cp /tmp/src/fuzzing/proto/asn1-pdu/* /tmp/src/
+            rm -rf genfiles && mkdir genfiles && /tmp/src/LPM/external.protobuf/bin/protoc asn1_pdu.proto --cpp_out=genfiles --proto_path=/tmp/src/
+            for F in $fuzzerLPMFiles
+            do
+              fuzzerName=$(echo ${F#*_})
+              fuzzerName=$(basename $fuzzerName .cc)
+              echo "Building fuzzer $fuzzerName"
+              $CXX $CXXFLAGS -I genfiles -I . -I /tmp/src/libprotobuf-mutator/ -I /tmp/src/LPM/external.protobuf/include -I include $LIB_FUZZING_ENGINE \
+                  -DNDEBUG \
+                  -I /tmp/src/boringssl/include \
+                  $F genfiles/asn1_pdu.pb.cc /tmp/src/asn1_pdu_to_der.cc /tmp/src/common.cc \
+                  ./libssl.a ./libcrypto.a \
+                  /tmp/src/LPM/src/libfuzzer/libprotobuf-mutator-libfuzzer.a \
+                  /tmp/src/LPM/src/libprotobuf-mutator.a \
+                  -Wl,--start-group /tmp/src/LPM/external.protobuf/lib/lib*.a -Wl,--end-group \
+                  -o $GITHUB_WORKSPACE/build/fuzz-targets/"${fuzzerName}_lpm"
+            done
+          fi
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

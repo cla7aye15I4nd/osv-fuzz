@@ -1,0 +1,176 @@
+name: "Fuzz openvpn"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: openvpn
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            libcap-ng-dev \
+            liblzo2-dev \
+            libnl-3-dev \
+            libnl-genl-3-dev \
+            libpam-dev \
+            libssl-dev \
+            libtool \
+            pkg-config
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/google/boringssl.git /tmp/src/boringssl
+          git clone --depth 1 https://github.com/OpenVPN/openvpn /tmp/src/openvpn
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/openvpn
+          BASE=/tmp/src/openvpn/src/openvpn
+          apply_sed_changes() {
+            sed -i 's/read(/fuzz_read(/g' ${BASE}/console_systemd.c
+            sed -i 's/fgets(/fuzz_fgets(/g' ${BASE}/console_builtin.c
+            sed -i 's/fgets(/fuzz_fgets(/g' ${BASE}/misc.c
+            sed -i 's/#include "forward.h"/#include "fuzz_header.h"\n#include "forward.h"/g' ${BASE}/proxy.c
+            sed -i 's/openvpn_select(/fuzz_select(/g' ${BASE}/proxy.c
+            sed -i 's/openvpn_send(/fuzz_send(/g' ${BASE}/proxy.c
+            sed -i 's/recv(/fuzz_recv(/g' ${BASE}/proxy.c
+            sed -i 's/isatty/fuzz_isatty/g' ${BASE}/console_builtin.c
+            sed -i 's/fopen/fuzz_fopen/g' ${BASE}/console_builtin.c
+            sed -i 's/fclose/fuzz_fclose/g' ${BASE}/console_builtin.c
+            sed -i 's/sendto/fuzz_sendto/g' ${BASE}/socket.h
+            sed -i 's/#include "misc.h"/#include "misc.h"\nextern size_t fuzz_sendto(int sockfd, void *buf, size_t len, int flags, struct sockaddr *dest_addr, socklen_t addrlen);/g' ${BASE}/socket.h
+            sed -i 's/fp = (flags/fp = stdout;\n\/\//g' ${BASE}/error.c
+            sed -i 's/crypto_msg(M_FATAL/crypto_msg(M_WARN/g' ${BASE}/crypto_openssl.c
+            sed -i 's/msg(M_FATAL, \"Cipher/return;msg(M_FATAL, \"Cipher/g' ${BASE}/crypto.c
+            sed -i 's/msg(M_FATAL/msg(M_WARN/g' ${BASE}/crypto.c
+            sed -i 's/= write/= fuzz_write/g' ${BASE}/packet_id.c
+          }
+          echo "" >> ${BASE}/openvpn.c
+          echo "#include \"fake_fuzz_header.h\"" >> ${BASE}/openvpn.c
+          echo "ssize_t fuzz_get_random_data(void *buf, size_t len) { return 0; }" >> ${BASE}/fake_fuzz_header.h
+          echo "int fuzz_success;" >> ${BASE}/fake_fuzz_header.h
+          apply_sed_changes
+          zip -r $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_verify_cert_seed_corpus.zip /tmp/src/boringssl/fuzz/cert_corpus
+          autoreconf -ivf
+          ./configure --disable-lz4 --with-crypto-library=openssl OPENSSL_LIBS="-L/usr/local/ssl/ -lssl -lcrypto" OPENSSL_CFLAGS="-I/usr/local/ssl/include/"
+          make -j$(nproc)
+          cd src/openvpn
+          rm openvpn.o
+          ar r libopenvpn.a *.o
+          $CXX $CXXFLAGS -g -c /tmp/src/fuzz_randomizer.cpp -o /tmp/src/fuzz_randomizer.o
+          for fuzzname in dhcp misc base64 proxy buffer route packet_id mroute list verify_cert; do
+              $CC -DHAVE_CONFIG_H -I. -I../.. -I../../include -I../../src/compat -I/usr/include/libnl3/ \
+                -DPLUGIN_LIBDIR=\"/usr/local/lib/openvpn/plugins\" -std=c99 $CFLAGS \
+                -c /tmp/src/fuzz_${fuzzname}.c -o /tmp/src/fuzz_${fuzzname}.o
+              $CXX ${CXXFLAGS} ${LIB_FUZZING_ENGINE} /tmp/src/fuzz_${fuzzname}.o -o $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_${fuzzname} /tmp/src/fuzz_randomizer.o \
+                  libopenvpn.a ../../src/compat/.libs/libcompat.a /usr/lib/x86_64-linux-gnu/libnsl.a \
+                  /usr/lib/x86_64-linux-gnu/libresolv.a /usr/lib/x86_64-linux-gnu/liblzo2.a \
+                  -lssl -lcrypto -ldl -l:libnl-3.a -l:libnl-genl-3.a -lcap-ng
+          done
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

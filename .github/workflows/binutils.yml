@@ -1,0 +1,254 @@
+name: "Fuzz binutils"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: binutils
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            bison \
+            flex \
+            libgmp-dev \
+            libmpfr-dev \
+            texinfo
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/DavidKorczynski/binary-samples /tmp/src/binary-samples
+          git clone --depth 1 git://sourceware.org/git/binutils-gdb.git /tmp/src/binutils-gdb
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src
+          if [ "$SANITIZER" = undefined ]; then
+              export CFLAGS="$CFLAGS -fno-sanitize=unsigned-integer-overflow"
+              export CXXFLAGS="$CXXFLAGS -fno-sanitize=unsigned-integer-overflow"
+          fi
+          cd binutils-gdb
+          cd binutils
+          sed -i 's/vfprintf (stderr/\/\//' elfcomm.c
+          sed -i 's/fprintf (stderr/\/\//' elfcomm.c
+          sed -i '/^%%$/i%destructor { free (\$\$); } ID' defparse.y
+          cd ../
+          ./configure --disable-gdb --disable-gdbserver --disable-gdbsupport \
+          	    --disable-libdecnumber --disable-readline --disable-sim \
+          	    --disable-libbacktrace --disable-gas --disable-ld --disable-werror \
+                --enable-targets=all
+          make clean
+          make MAKEINFO=true -j$(nproc) && true
+          mkdir fuzz
+          cp ../fuzz_*.c fuzz/
+          cd fuzz
+          LIBS="../opcodes/libopcodes.a ../libctf/.libs/libctf.a ../bfd/.libs/libbfd.a ../zlib/libz.a ../libsframe/.libs/libsframe.a ../libiberty/libiberty.a"
+          for i in fuzz_disassemble fuzz_bfd fuzz_bfd_ext; do
+              $CC $CFLAGS -I ../include -I ../bfd -I ../opcodes -c $i.c -o $i.o
+              $CXX $CXXFLAGS $i.o -o $GITHUB_WORKSPACE/build/fuzz-targets/$i $LIB_FUZZING_ENGINE -Wl,--start-group ${LIBS} -Wl,--end-group
+          done
+          if [ -n "${OSS_FUZZ_CI-}" ]
+          then
+            echo "Skipping specialised disassembly fuzzers in CI to reduce build time"
+          else
+            for ARCH_TARGET in bfd_arch_arm bfd_arch_mips bfd_arch_i386 bfd_arch_arc bfd_arch_csky bfd_arch_mep; do
+                $CC $CFLAGS -I ../include -I ../bfd -I ../opcodes -c fuzz_disas_ext.c -DFUZZ_TARGET_ARCH=$ARCH_TARGET \
+                  -o fuzz_disas_ext-$ARCH_TARGET.o
+                $CXX $CXXFLAGS fuzz_disas_ext-$ARCH_TARGET.o -o $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_disas_ext-$ARCH_TARGET $LIB_FUZZING_ENGINE \
+                  -Wl,--start-group ${LIBS} -Wl,--end-group
+            done
+          fi
+          cd ../binutils
+          cp ../../fuzz_*.c .
+          sed 's/main (int argc/old_main (int argc, char **argv);\nint old_main (int argc/' readelf.c >> readelf.h
+          sed 's/main (int ac/old_main32 (int ac, char **av);\nint old_main32 (int ac/' dlltool.c > fuzz_dlltool.h
+          for i in objdump nm objcopy windres strings addr2line; do
+              sed -i 's/strip_main/strip_mian/g' $i.c
+              sed -i 's/copy_main/copy_mian/g' $i.c
+              sed 's/main (int argc/old_main32 (int argc, char **argv);\nint old_main32 (int argc/' $i.c > fuzz_$i.h
+              sed -i 's/copy_mian/copy_main/g' fuzz_$i.h
+          done
+          fuzz_compile () {
+            src=$1
+            dst=$2
+            extraflags=$3
+            $CC $CFLAGS ${extraflags} -DHAVE_CONFIG_H -DOBJDUMP_PRIVATE_VECTORS="" -I. -I../bfd -I./../bfd -I./../include \
+              -I./../zlib -DLOCALEDIR="\"/usr/local/share/locale\"" \
+              -Dbin_dummy_emulation=bin_vanilla_emulation -W -Wall -MT \
+              fuzz_$dst.o -MD -MP -c -o fuzz_$dst.o fuzz_$src.c
+          }
+          for i in objdump readelf nm objcopy windres ranlib_simulation strings addr2line dwarf; do
+            fuzz_compile $i $i ""
+          done
+          fuzz_compile dlltool dlltool "-DDLLTOOL_I386 -DDLLTOOL_DEFAULT_I386"
+          fuzz_compile objdump objdump_safe "-DOBJDUMP_SAFE"
+          fuzz_compile readelf readelf_pef "-DREADELF_TARGETED=\"pef\""
+          fuzz_compile readelf readelf_elf32_bigarm "-DREADELF_TARGETED=\"elf32-bigarm\""
+          fuzz_compile readelf readelf_elf32_littlearm "-DREADELF_TARGETED=\"elf32-littlearm\""
+          fuzz_compile readelf readelf_elf64_mmix "-DREADELF_TARGETED=\"elf64-mmix\""
+          fuzz_compile readelf readelf_elf32_csky "-DREADELF_TARGETED=\"elf32-csky\""
+          LINK_LIBS="-Wl,--start-group ${LIBS} -Wl,--end-group"
+          OBJ1="bucomm.o version.o filemode.o"
+          OBJ2="version.o unwind-ia64.o dwarf.o elfcomm.o demanguse.o"
+          OBJ3="dwarf.o prdbg.o rddbg.o unwind-ia64.o debug.o stabs.o rdcoff.o bucomm.o version.o filemode.o elfcomm.o od-xcoff.o demanguse.o"
+          declare -A fl
+          fl["readelf"]=${OBJ2}
+          fl["readelf_pef"]=${OBJ2}
+          fl["readelf_elf32_bigarm"]=${OBJ2}
+          fl["readelf_elf32_littlearm"]=${OBJ2}
+          fl["readelf_elf64_mmix"]=${OBJ2}
+          fl["readelf_elf32_csky"]=${OBJ2}
+          fl["objdump"]=${OBJ3}
+          fl["objdump_safe"]=${OBJ3}
+          fl["dwarf"]=${OBJ3}
+          fl["addr2line"]=${OBJ1}
+          fl["objcopy"]="rename.o rddbg.o debug.o stabs.o rdcoff.o wrstabs.o ${OBJ1}"
+          fl["nm"]="${OBJ1} demanguse.o"
+          fl["dlltool"]="defparse.o deflex.o ${OBJ1}"
+          fl["windres"]="resrc.o rescoff.o resbin.o rcparse.o rclex.o winduni.o resres.o ${OBJ1}"
+          fl["ranlib_simulation"]=" "
+          fl["strings"]=${OBJ1}
+          for fuzzer in ${!fl[@]}; do
+            $CXX $CXXFLAGS $LIB_FUZZING_ENGINE -W -Wall -I./../zlib \
+              -o $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_${fuzzer} fuzz_${fuzzer}.o \
+              ${fl[${fuzzer}]} ${LINK_LIBS}
+          done
+          if [ "$FUZZING_ENGINE" != "afl" ]
+          then
+            cd ../gas
+            ./configure --enable-leak-check
+            make -j$(nproc)
+            sed 's/main (int argc/old_main32 (int argc, char **argv);\nint old_main32 (int argc/' as.c > fuzz_as.h
+            rm as.o || true
+            ar r libar.a *.o
+            $CC $CFLAGS -DHAVE_CONFIG_H -I.  -I. -I. -I../bfd -I./config -I./../include -I./.. -I./../bfd \
+                -DLOCALEDIR="\"/usr/local/share/locale\"" -I./../zlib -c /tmp/src/fuzz_as.c -o fuzz_as.o
+            $CXX $CXXFLAGS $LIB_FUZZING_ENGINE -I./../zlib -o $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_as ./fuzz_as.o \
+                libar.a config/tc-i386.o config/obj-elf.o config/atof-ieee.o  \
+                ../opcodes/.libs/libopcodes.a ../bfd/.libs/libbfd.a \
+                -L/src/binutils-gdb/zlib ../libsframe/.libs/libsframe.a ../libiberty/libiberty.a -lz
+          fi
+          for fuzzname in readelf_pef readelf_elf32_csky readelf_elf64_mmix readelf_elf32_littlearm readelf_elf32_bigarm objdump objdump_safe nm objcopy bfd windres addr2line dwarf; do
+            cp /tmp/src/binary-samples/oss-fuzz-binutils/general_seeds.zip $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_${fuzzname}_seed_corpus.zip
+          done
+          python3 /tmp/src/generate_seeds.py /tmp/src/generated_seeds
+          GEN_OBJ_SEEDS=$(find /tmp/src/generated_seeds/seeds/elf_reloc \
+              /tmp/src/generated_seeds/seeds/dwarf /tmp/src/generated_seeds/seeds/elf_meta \
+              /tmp/src/generated_seeds/seeds/archive -type f)
+          for fuzzname in readelf readelf_pef readelf_elf32_csky readelf_elf64_mmix \
+              readelf_elf32_littlearm readelf_elf32_bigarm objdump objdump_safe nm \
+              objcopy bfd addr2line dwarf; do
+            zip -j $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_${fuzzname}_seed_corpus.zip $GEN_OBJ_SEEDS
+          done
+          zip -j $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_as_seed_corpus.zip /tmp/src/generated_seeds/seeds/gas/seed.s
+          zip -j $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_dlltool_seed_corpus.zip \
+              /tmp/src/generated_seeds/seeds/dlltool/seed.def
+          cp /tmp/src/binary-samples/oss-fuzz-binutils/fuzz_bfd_ext_seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_bfd_ext_seed_corpus.zip
+          for ft in readelf readelf_pef readelf_elf32_csky readelf_elf64_mmix readelf_elf32_littlearm readelf_elf32_bigarm objcopy objdump dlltool disas_ext-bfd_arch_csky nm as windres objdump_safe ranlib_simulation addr2line dwarf; do
+            echo "[libfuzzer]" > $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_${ft}.options
+            echo "detect_leaks=0" >> $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_${ft}.options
+          done
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

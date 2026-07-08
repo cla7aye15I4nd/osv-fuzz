@@ -1,0 +1,268 @@
+name: "Fuzz tensorflow"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: tensorflow
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            rsync
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/tensorflow/tensorflow /tmp/src/tensorflow
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/tensorflow
+          cat >> /tmp/src/tensorflow/tensorflow/security/fuzzing/tf_fuzzing.bzl << 'ENDBZL'
+          def tf_oss_fuzz_fuzztest(
+                  name,
+                  fuzzing_dict = [],
+                  corpus = [],
+                  deps = [],
+                  tags = [],
+                  **kwargs):
+              cc_test(
+                  name = name,
+                  deps = deps + [
+                      "@com_google_fuzztest//fuzztest",
+                      "@com_google_fuzztest//fuzztest:fuzztest_gtest_main",
+                  ],
+                  **kwargs
+              )
+          ENDBZL
+          python3 -c "
+          import re, os
+          path = os.path.join('/tmp/src', 'tensorflow', 'tensorflow', 'security', 'fuzzing', 'cc', 'BUILD')
+          with open(path) as f:
+              content = f.read()
+          content = re.sub(r'\ntf_cc_fuzz_test\(\s*name\s*=\s*\"checkpoint_reader_fuzz\".*?\)\n', '\n', content, flags=re.DOTALL)
+          with open(path, 'w') as f:
+              f.write(content)
+          "
+          if [ "$SANITIZER" = "undefined" ]; then
+            rm /tmp/src/tensorflow/tensorflow/security/fuzzing/cc/core/function/BUILD
+          fi
+          find /tmp/src/tensorflow/tensorflow/ -name "BUILD" -exec sed -i 's/tf_cc_fuzz_test/tf_oss_fuzz_fuzztest/g' {} \;
+          sed -i '/name = "einsum_op_util"/a\    visibility = ["//visibility:public"],' tensorflow/core/util/BUILD
+          sed -i 's/build:linux --copt=\"-Wno-unknown-warning\"/# overwritten/g' ./.bazelrc
+          sed -i 's/build:linux --copt=\"-Wno-array-parameter\"/# overwritten/g' ./.bazelrc
+          sed -i 's/build:linux --copt=\"-Wno-stringop-overflow\"/# overwritten/g' ./.bazelrc
+          export TF_PYTHON_VERSION=3.11
+          PYTHON=python3
+          yes "" | ${PYTHON} configure.py
+          synchronize_coverage_directories() {
+            if [ "$SANITIZER" = "coverage" ]
+            then
+              declare -r RSYNC_CMD="rsync -aLkR"
+              declare -r REMAP_PATH=$GITHUB_WORKSPACE/build/fuzz-targets/proc/self/cwd/
+              mkdir -p ${REMAP_PATH}
+              declare -r RSYNC_FILTER_ARGS=("--include" "*.h" "--include" "*.cc" "--include" \
+                "*.hpp" "--include" "*.cpp" "--include" "*.c" "--include" "*/" "--include" "*.inc" \
+                "--include" "*.def" "--exclude" "*")
+              ${RSYNC_CMD} "${RSYNC_FILTER_ARGS[@]}" tensorflow/ ${REMAP_PATH}
+              if [ -d "./bazel-out/k8-opt/bin/tensorflow/" ]
+              then
+                ${RSYNC_CMD} "${RSYNC_FILTER_ARGS[@]}" ./bazel-out/k8-opt/bin/tensorflow/ ${REMAP_PATH}
+              fi
+              if [ -d "./bazel-out/k8-opt/bin/external" ]
+              then
+                ${RSYNC_CMD} "${RSYNC_FILTER_ARGS[@]}" ./bazel-out/k8-opt/bin/external/ ${REMAP_PATH}
+              fi
+              if [ -d "./bazel-out/k8-opt/bin/third_party" ]
+              then
+                ${RSYNC_CMD} "${RSYNC_FILTER_ARGS[@]}" ./bazel-out/k8-opt/bin/third_party/ ${REMAP_PATH}
+              fi
+              pushd bazel-tensorflow
+              [[ -e external/org_tensorflow ]] && unlink external/org_tensorflow
+              ${RSYNC_CMD} external/ ${REMAP_PATH}
+              popd
+            fi
+          }
+          CXXFLAGS="${CXXFLAGS//-stdlib=libc++/}"
+          declare -r EXTRA_FLAGS="\
+          $(
+          for f in ${CFLAGS}; do
+            echo "--conlyopt=${f}" "--linkopt=${f}"
+          done
+          for f in ${CXXFLAGS}; do
+              echo "--cxxopt=${f}" "--linkopt=${f}"
+          done
+          if [ "$SANITIZER" = "undefined" ]
+          then
+            echo "--linkopt=$(find /usr/local/lib -name 'libclang_rt.ubsan_standalone_cxx*.a' -path '*x86_64*' ! -name '*.syms' | head -1)"
+            echo "--linkopt=$(find /usr/local/lib -name 'libclang_rt.ubsan_standalone.a' -path '*x86_64*' | head -1)"
+            sed -i -e 's/"\/\/conditions:default": \[/"\/\/conditions:default": \[\n"-fno-sanitize=undefined",/' third_party/nasm/nasm.BUILD
+            sed -i -e 's/includes/linkopts = \["-fno-sanitize=undefined"\],\nincludes/' third_party/nasm/nasm.BUILD
+          fi
+          if [ "$SANITIZER" = "address" ]
+          then
+            echo "--action_env=ASAN_OPTIONS=detect_leaks=0,detect_odr_violation=0"
+          fi
+          )"
+          sed -i -e 's/linkstatic/linkopts = \["-fsanitize=fuzzer"\],\nlinkstatic/' tensorflow/security/fuzzing/tf_fuzzing.bzl
+          FUZZER_NO_MAIN_LIB=$(find /usr/local/lib -name "libclang_rt.fuzzer_no_main.a" -path "*x86_64*" 2>/dev/null | head -1)
+          SHIMS_LIB=/tmp/src/tensorflow/libglibc_c23_shims.a
+          cat > /tmp/glibc_c23_shims.c << 'SHIMEOF'
+          unsigned long strtoul(const char *, char **, int);
+          unsigned long __isoc23_strtoul(const char *n, char **e, int b) { return strtoul(n, e, b); }
+          long strtol(const char *, char **, int);
+          long __isoc23_strtol(const char *n, char **e, int b) { return strtol(n, e, b); }
+          long long strtoll_l(const char *, char **, int, void *);
+          long long __isoc23_strtoll_l(const char *n, char **e, int b, void *l) { return strtoll_l(n, e, b, l); }
+          unsigned long long strtoull(const char *, char **, int);
+          unsigned long long __isoc23_strtoull(const char *n, char **e, int b) { return strtoull(n, e, b); }
+          unsigned long long strtoull_l(const char *, char **, int, void *);
+          unsigned long long __isoc23_strtoull_l(const char *n, char **e, int b, void *l) { return strtoull_l(n, e, b, l); }
+          int vsscanf(const char *, const char *, __builtin_va_list);
+          int __isoc23_vsscanf(const char *s, const char *fmt, __builtin_va_list ap) { return vsscanf(s, fmt, ap); }
+          int __isoc23_sscanf(const char *s, const char *fmt, ...) {
+              __builtin_va_list ap;
+              __builtin_va_start(ap, fmt);
+              int r = vsscanf(s, fmt, ap);
+              __builtin_va_end(ap);
+              return r;
+          }
+          SHIMEOF
+          clang -c -o /tmp/glibc_c23_shims.o /tmp/glibc_c23_shims.c
+          ar rcs "${SHIMS_LIB}" /tmp/glibc_c23_shims.o
+          UBSAN_EXTRA_LINKOPT=""
+          if [ "$SANITIZER" = "undefined" ]; then
+            UBSAN_LIB=$(find /usr/local/lib -name "libclang_rt.ubsan_standalone.a" -path "*x86_64*" ! -name "*.syms" 2>/dev/null | head -1)
+            UBSAN_CXX_LIB=$(find /usr/local/lib -name "libclang_rt.ubsan_standalone_cxx.a" -path "*x86_64*" ! -name "*.syms" 2>/dev/null | head -1)
+            [ -n "${UBSAN_LIB}" ] && UBSAN_EXTRA_LINKOPT="--linkopt=${UBSAN_LIB}"
+            [ -n "${UBSAN_CXX_LIB}" ] && UBSAN_EXTRA_LINKOPT="${UBSAN_EXTRA_LINKOPT} --linkopt=${UBSAN_CXX_LIB}"
+          fi
+          export FUZZTEST_EXTRA_ARGS="--spawn_strategy=sandboxed --action_env=ASAN_OPTIONS=detect_leaks=0,detect_odr_violation=0 --define force_libcpp=enabled --verbose_failures --copt=-UNDEBUG --config=monolithic --linkopt=${FUZZER_NO_MAIN_LIB} --linkopt=${SHIMS_LIB} ${UBSAN_EXTRA_LINKOPT}"
+          if [ -n "${OSS_FUZZ_CI-}" ]
+          then
+            export FUZZTEST_EXTRA_ARGS="${FUZZTEST_EXTRA_ARGS} --local_ram_resources=HOST_RAM*1.0 --local_cpu_resources=HOST_CPUS*.65 --strip=always"
+          else
+            export FUZZTEST_EXTRA_ARGS="${FUZZTEST_EXTRA_ARGS} --local_ram_resources=HOST_RAM*1.0 --local_cpu_resources=HOST_CPUS*.15 --strip=never"
+          fi
+          export FUZZTEST_DO_SYNC="no"
+          export FUZZTEST_TARGET_FOLDER="//tensorflow/security/fuzzing/cc:all+//tensorflow/cc/saved_model/...+//tensorflow/cc/framework/fuzzing/...+//tensorflow/core/common_runtime/...+//tensorflow/core/framework/..."
+          rm -f /tmp/src/tensorflow/tensorflow/security/fuzzing/cc/ops/BUILD
+          if [ -n "${OSS_FUZZ_CI-}" ]
+          then
+            echo "In CI overwriting targets to only build a single target."
+            export FUZZTEST_TARGET_FOLDER="//tensorflow/security/fuzzing/cc:base64_fuzz"
+            unset FUZZTEST_EXTRA_TARGETS
+          fi
+          echo "  write_to_bazelrc('import %workspace%/tools/bazel.rc')" >> configure.py
+          yes "" | ./configure
+          compile_fuzztests.sh
+          if [ -n "${OSS_FUZZ_CI-}" ]
+          then
+            exit 0
+          fi
+          synchronize_coverage_directories
+          rm -f bazel-*
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

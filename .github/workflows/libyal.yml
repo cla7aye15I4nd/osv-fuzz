@@ -1,0 +1,215 @@
+name: "Fuzz libyal"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: libyal
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            autopoint \
+            byacc \
+            flex \
+            libtool \
+            pkg-config
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/libyal/libcaes.git /tmp/src/libcaes
+          git clone --depth 1 https://github.com/libyal/libfcrypto.git /tmp/src/libfcrypto
+          git clone --depth 1 https://github.com/libyal/libfmapi.git /tmp/src/libfmapi
+          git clone --depth 1 https://github.com/libyal/libfmos.git /tmp/src/libfmos
+          git clone --depth 1 https://github.com/libyal/libfplist.git /tmp/src/libfplist
+          git clone --depth 1 https://github.com/libyal/libftxf.git /tmp/src/libftxf
+          git clone --depth 1 https://github.com/libyal/libfusn.git /tmp/src/libfusn
+          git clone --depth 1 https://github.com/libyal/libfwevt.git /tmp/src/libfwevt
+          git clone --depth 1 https://github.com/libyal/libfwnt.git /tmp/src/libfwnt
+          git clone --depth 1 https://github.com/libyal/libfwps.git /tmp/src/libfwps
+          git clone --depth 1 https://github.com/libyal/libfwsi.git /tmp/src/libfwsi
+          git clone --depth 1 https://github.com/libyal/libhmac.git /tmp/src/libhmac
+          git clone --depth 1 https://github.com/libyal/libagdb.git /tmp/src/libagdb
+          git clone --depth 1 https://github.com/libyal/libcreg.git /tmp/src/libcreg
+          git clone --depth 1 https://github.com/libyal/libesedb.git /tmp/src/libesedb
+          git clone --depth 1 https://github.com/libyal/libevt.git /tmp/src/libevt
+          git clone --depth 1 https://github.com/libyal/libevtx.git /tmp/src/libevtx
+          git clone --depth 1 https://github.com/libyal/libexe.git /tmp/src/libexe
+          git clone --depth 1 https://github.com/libyal/liblnk.git /tmp/src/liblnk
+          git clone --depth 1 https://github.com/libyal/libmdmp.git /tmp/src/libmdmp
+          git clone --depth 1 https://github.com/libyal/libmsiecf.git /tmp/src/libmsiecf
+          git clone --depth 1 https://github.com/libyal/libnk2.git /tmp/src/libnk2
+          git clone --depth 1 https://github.com/libyal/libolecf.git /tmp/src/libolecf
+          git clone --depth 1 https://github.com/libyal/libpff.git /tmp/src/libpff
+          git clone --depth 1 https://github.com/libyal/libregf.git /tmp/src/libregf
+          git clone --depth 1 https://github.com/libyal/libscca.git /tmp/src/libscca
+          git clone --depth 1 https://github.com/libyal/libwtcdb.git /tmp/src/libwtcdb
+          git clone --depth 1 https://github.com/libyal/libwrc.git /tmp/src/libwrc
+          git clone --depth 1 https://github.com/libyal/libfsapfs.git /tmp/src/libfsapfs
+          git clone --depth 1 https://github.com/libyal/libfsext.git /tmp/src/libfsext
+          git clone --depth 1 https://github.com/libyal/libfsfat.git /tmp/src/libfsfat
+          git clone --depth 1 https://github.com/libyal/libfshfs.git /tmp/src/libfshfs
+          git clone --depth 1 https://github.com/libyal/libfsntfs.git /tmp/src/libfsntfs
+          git clone --depth 1 https://github.com/libyal/libfsxfs.git /tmp/src/libfsxfs
+          git clone --depth 1 https://github.com/libyal/libbde.git /tmp/src/libbde
+          git clone --depth 1 https://github.com/libyal/libfvde.git /tmp/src/libfvde
+          git clone --depth 1 https://github.com/libyal/libluksde.git /tmp/src/libluksde
+          git clone --depth 1 https://github.com/libyal/libvsapm.git /tmp/src/libvsapm
+          git clone --depth 1 https://github.com/libyal/libvsbsdl.git /tmp/src/libvsbsdl
+          git clone --depth 1 https://github.com/libyal/libvsgpt.git /tmp/src/libvsgpt
+          git clone --depth 1 https://github.com/libyal/libvshadow.git /tmp/src/libvshadow
+          git clone --depth 1 https://github.com/libyal/libvslvm.git /tmp/src/libvslvm
+          git clone --depth 1 https://github.com/libyal/libvsmbr.git /tmp/src/libvsmbr
+          git clone --depth 1 https://github.com/libyal/libewf.git /tmp/src/libewf
+          git clone --depth 1 https://github.com/libyal/libmodi.git /tmp/src/libmodi
+          git clone --depth 1 https://github.com/libyal/libodraw.git /tmp/src/libodraw
+          git clone --depth 1 https://github.com/libyal/libphdi.git /tmp/src/libphdi
+          git clone --depth 1 https://github.com/libyal/libqcow.git /tmp/src/libqcow
+          git clone --depth 1 https://github.com/libyal/libsmraw.git /tmp/src/libsmraw
+          git clone --depth 1 https://github.com/libyal/libvhdi.git /tmp/src/libvhdi
+          git clone --depth 1 https://github.com/libyal/libvmdk.git /tmp/src/libvmdk
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/libyal
+          for PROJECT in /tmp/src/*;
+          do
+            PROJECT=$(basename ${PROJECT})
+            if ! test -d /tmp/src/${PROJECT}/ossfuzz || ! test -x /tmp/src/${PROJECT}/synclibs.sh;
+            then
+              continue
+            fi
+            cd /tmp/src/${PROJECT}
+            sed 's/^AC_PREREQ.*$/AC_PREREQ([2.69])/' -i configure.ac
+            sed 's/^AM_GNU_GETTEXT_VERSION.*$/AM_GNU_GETTEXT_VERSION([0.19])/' -i configure.ac
+            ./synclibs.sh
+            ./autogen.sh
+            ./configure --enable-shared=no --with-openssl=no --with-zlib=no
+            make -j$(nproc) LIB_FUZZING_ENGINE=${LIB_FUZZING_ENGINE}
+            if test -x ./synctestdata.sh;
+            then
+              ./synctestdata.sh
+            fi
+            for FUZZ_TARGET in $(cd ossfuzz && find . -executable -type f);
+            do
+              FUZZ_TARGET=$(basename ${FUZZ_TARGET})
+              cp ossfuzz/${FUZZ_TARGET} $GITHUB_WORKSPACE/build/fuzz-targets/${PROJECT}_${FUZZ_TARGET}
+              LIBYAL_TYPE_NAME=${FUZZ_TARGET/_fuzzer/};
+              if test -f tests/data/${LIBYAL_TYPE_NAME/}.1;
+              then
+                (cd tests/data && zip $GITHUB_WORKSPACE/build/fuzz-targets/${PROJECT}_${FUZZ_TARGET}_seed_corpus.zip ${LIBYAL_TYPE_NAME}.*)
+              elif test -d tests/input/public;
+              then
+                (cd tests/input/public && zip $GITHUB_WORKSPACE/build/fuzz-targets/${PROJECT}_${FUZZ_TARGET}_seed_corpus.zip *)
+              else
+                echo "Missing test data for seed corpus."
+                exit 1
+              fi
+            done
+          done
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

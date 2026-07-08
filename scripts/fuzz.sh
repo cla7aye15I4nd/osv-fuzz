@@ -81,6 +81,17 @@ for binary in "$FUZZ_DIR"/*; do
         done
     fi
 
+    # Check for hangs
+    hang_dir="$output_dir/default/hangs"
+    if [ -d "$hang_dir" ]; then
+        for hang_file in "$hang_dir"/id:*; do
+            [ -f "$hang_file" ] || continue
+            hang_name=$(basename "$hang_file")
+            cp "$hang_file" "$FUZZ_RESULTS_DIR/${bname}_hang_${hang_name}.bin"
+            echo "  [!] HANG: $bname from fuzzing"
+        done
+    fi
+
     # Cleanup large fuzzing output to save space
     rm -rf "$input_dir" "$output_dir"
 done

@@ -1,4 +1,4 @@
-name: "Fuzz curl"
+name: "Fuzz libdwarf"
 
 on:
   workflow_dispatch:
@@ -6,11 +6,9 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
-  schedule:
-    - cron: "0 3 * * 0"
 
 env:
-  PROJECT: curl
+  PROJECT: libdwarf
   FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -31,76 +29,64 @@ jobs:
         run: |
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
-            libssl-dev libnghttp2-dev libssh2-1-dev libidn2-dev \
-            librtmp-dev libpsl-dev libgsasl-dev zlib1g-dev \
-            libzstd-dev libbrotli-dev
+            cmake \
+            zlib1g-dev
 
-      - name: Clone curl source
-        run: git clone --depth 1 https://github.com/curl/curl.git /tmp/curl-src
-
-      - name: Clone curl-fuzzer
-        run: git clone --depth 1 https://github.com/curl/curl-fuzzer.git /tmp/curl-fuzzer
-
-      - name: Build curl with AFL++ instrumentation
+      - name: Clone source
         run: |
-          cd /tmp/curl-src
-          autoreconf -fi
-          export CC=afl-cc
-          export CXX=afl-c++
-          export AFL_USE_ASAN=1
-          ./configure \
-            --disable-shared \
-            --enable-static \
-            --with-openssl \
-            --with-nghttp2 \
-            --with-libssh2 \
-            --prefix=/tmp/curl-install
-          make -j$(nproc)
-          make install
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/davea42/libdwarf-code /tmp/tmp/src/libdwarf
+          git clone --depth 1 https://github.com/davea42/libdwarf-binary-samples /tmp/tmp/src/libdwarf-binary-samples
 
       - name: Build fuzz targets with AFL++
         run: |
-          mkdir -p build/fuzz-targets
-          cd /tmp/curl-fuzzer
+          mkdir -p build/fuzz-targets /tmp/work
           export CC=afl-cc
           export CXX=afl-c++
-          export AFL_USE_ASAN=1
-          export CURL_INSTALL=/tmp/curl-install
-          export PKG_CONFIG_PATH=/tmp/curl-install/lib/pkgconfig
-
-          for fuzzer_src in *.cc; do
-            [ -f "$fuzzer_src" ] || continue
-            target_name="${fuzzer_src%.cc}"
-            echo "[+] Building $target_name..."
-
-            $CXX $CXXFLAGS -std=c++11 \
-              -I/tmp/curl-install/include \
-              -c "$fuzzer_src" -o "${target_name}.o" 2>/dev/null || continue
-
-            $CXX $CXXFLAGS \
-              "${target_name}.o" \
-              -o "$GITHUB_WORKSPACE/build/fuzz-targets/${target_name}" \
-              /tmp/curl-install/lib/libcurl.a \
-              -lssl -lcrypto -lnghttp2 -lssh2 -lidn2 -lpsl \
-              -lz -lzstd -lbrotlidec -lbrotlicommon \
-              -lpthread -ldl -lrt 2>/dev/null || {
-                echo "  [-] Link failed for $target_name, trying minimal link..."
-                $CXX $CXXFLAGS \
-                  "${target_name}.o" \
-                  -o "$GITHUB_WORKSPACE/build/fuzz-targets/${target_name}" \
-                  /tmp/curl-install/lib/libcurl.a \
-                  -lssl -lcrypto -lz -lpthread -ldl 2>/dev/null || {
-                    echo "  [-] Skipping $target_name"
-                    continue
-                  }
-              }
-
-            echo "  [+] Built $target_name"
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/libdwarf
+          export BINARY_SAMPLES_DIR="/tmp/src/libdwarf-binary-samples"
+          export BINARY_SAMPLES_V1="$BINARY_SAMPLES_DIR/binary-samples"
+          export BINARY_SAMPLES_V2="$BINARY_SAMPLES_DIR/binary-samples-v2"
+          export FUZZER_DIR="/tmp/src/libdwarf/fuzz"
+          mkdir /tmp/src/corp
+          cp $BINARY_SAMPLES_V1/elf* /tmp/src/corp
+          cp $BINARY_SAMPLES_V1/Mach* /tmp/src/corp
+          cp $BINARY_SAMPLES_V1/pe* /tmp/src/corp
+          cp $BINARY_SAMPLES_V1/lib* /tmp/src/corp
+          for file in $BINARY_SAMPLES_V2/{linux,windows}/*_DWARF*/* $BINARY_SAMPLES_V2/macOS-arm/*/*; do 
+           export newfile=$(echo $file | sed 's/ /_/g')
+           cp "$file" /tmp/src/corp/$(echo "$newfile" | cut -d/ -f5,6 | sed 's/\//_/g')_$(basename "$newfile")
+          done
+          zip -r -j $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_seed_corpus.zip /tmp/src/corp
+          for fuzzFile in $FUZZER_DIR/fuzz*.c; do
+            fuzzName=$(basename "$fuzzFile" '.c')
+            cp $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzName}_seed_corpus.zip
+          done
+          rm $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_seed_corpus.zip
+          mkdir build
+          cd build
+          cmake ../ -DDO_TESTING=ON
+          make
+          for fuzzFile in $FUZZER_DIR/fuzz*.c; do
+            fuzzName=$(basename "$fuzzFile" '.c')
+            $CC $CFLAGS $LIB_FUZZING_ENGINE -I../src/lib/libdwarf/ \
+              "$FUZZER_DIR/${fuzzName}.c" -o "$GITHUB_WORKSPACE/build/fuzz-targets/${fuzzName}" ./src/lib/libdwarf/libdwarf.a -lz
           done
 
-          echo ""
+      - name: Verify fuzz targets
+        run: |
           echo "[+] Built targets:"
-          ls -la "$GITHUB_WORKSPACE/build/fuzz-targets/" || echo "No targets built"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
 
       - name: Upload built fuzz targets
         uses: actions/upload-artifact@v4

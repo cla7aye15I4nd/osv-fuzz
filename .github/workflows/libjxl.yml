@@ -1,0 +1,191 @@
+name: "Fuzz libjxl"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: libjxl
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            cmake \
+            libjpeg-dev \
+            ninja-build \
+            pkg-config
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/libjxl/libjxl.git /tmp/src/libjxl
+          git clone --depth 1 https://github.com/libjpeg-turbo/seed-corpora /tmp/src/seed-corpora
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/libjxl
+          build_args=(
+            -G Ninja
+            -DBUILD_TESTING=OFF
+            -DBUILD_SHARED_LIBS=OFF
+            -DJPEGXL_ENABLE_BENCHMARK=OFF
+            -DJPEGXL_ENABLE_DEVTOOLS=ON
+            -DJPEGXL_ENABLE_EXAMPLES=OFF
+            -DJPEGXL_ENABLE_FUZZERS=ON
+            -DJPEGXL_ENABLE_MANPAGES=OFF
+            -DJPEGXL_ENABLE_SJPEG=OFF
+            -DJPEGXL_ENABLE_VIEWERS=OFF
+            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
+          )
+          (
+            unset CFLAGS
+            unset CXXFLAGS
+            export AFL_NOOPT=1
+            rm -rf /tmp/work/libjxl-corpus
+            mkdir -p /tmp/work/libjxl-corpus
+            cd /tmp/work/libjxl-corpus
+            cmake "${build_args[@]}" "/tmp/src/libjxl"
+            ninja clean
+            ninja djxl_fuzzer_corpus
+            fuzzers=(
+              djxl_fuzzer
+            )
+            for fuzzer in "${fuzzers[@]}"; do
+              mkdir -p "${fuzzer}_corpus"
+              "tools/${fuzzer}_corpus" -q -r "${fuzzer}_corpus"
+            done
+            for fuzzer in "${fuzzers[@]}"; do
+              zip -q -j "$GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer}_seed_corpus.zip" "${fuzzer}_corpus"/*
+            done
+          )
+          export CXXFLAGS="${CXXFLAGS} -DJXL_IS_DEBUG_BUILD=1"
+          if [ "$SANITIZER" == "undefined" ]; then
+            build_args[${#build_args[@]}]="-DCXX_NO_RTTI_SUPPORTED=OFF"
+          fi
+          rm -rf /tmp/work/libjxl-fuzzer
+          mkdir -p /tmp/work/libjxl-fuzzer
+          cd /tmp/work/libjxl-fuzzer
+          cmake \
+            "${build_args[@]}" \
+            -DJPEGXL_FUZZER_LINK_FLAGS="${LIB_FUZZING_ENGINE}" \
+            "/tmp/src/libjxl"
+          fuzzers=(
+            cjxl_fuzzer
+            color_encoding_fuzzer
+            decode_basic_info_fuzzer
+            djxl_fuzzer
+            fields_fuzzer
+            icc_codec_fuzzer
+            rans_fuzzer
+            set_from_bytes_fuzzer
+            streaming_fuzzer
+            transforms_fuzzer
+          )
+          ninja clean
+          ninja "${fuzzers[@]}"
+          for fuzzer in "${fuzzers[@]}"; do
+            cp tools/${fuzzer} "$GITHUB_WORKSPACE/build/fuzz-targets/"
+          done
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

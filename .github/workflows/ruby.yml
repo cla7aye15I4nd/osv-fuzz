@@ -1,0 +1,246 @@
+name: "Fuzz ruby"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: ruby
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            bison \
+            libssl-dev \
+            libtool \
+            libyaml-dev \
+            ruby \
+            ruby-dev \
+            zlib1g-dev
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/ruby/ruby /tmp/tmp/src/ruby
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src
+          echo "Step 1: Installing latest Ruby release as baseruby..."
+          RUBY_VERSION="3.3.6"  # Update this to latest stable version
+          RUBY_DOWNLOAD_URL="https://cache.ruby-lang.org/pub/ruby/3.3/ruby-${RUBY_VERSION}.tar.gz"
+          BASERUBY_PREFIX="/tmp/work/baseruby"
+          cd "/tmp/work"
+          if [ ! -f "ruby-${RUBY_VERSION}.tar.gz" ]; then
+              echo "Downloading Ruby ${RUBY_VERSION}..."
+              wget -q "$RUBY_DOWNLOAD_URL" -O "ruby-${RUBY_VERSION}.tar.gz"
+              tar xzf "ruby-${RUBY_VERSION}.tar.gz"
+          fi
+          cd "ruby-${RUBY_VERSION}"
+          if [ ! -f "$BASERUBY_PREFIX/bin/ruby" ]; then
+              echo "Building baseruby ${RUBY_VERSION}..."
+              ./configure \
+                  --prefix="$BASERUBY_PREFIX" \
+                  --disable-install-doc \
+                  --disable-install-rdoc \
+                  --disable-jit-support \
+                  CFLAGS="-O2" \
+                  CXXFLAGS="-O2"
+              make -j$(nproc)
+              make install
+              echo "Baseruby installed to $BASERUBY_PREFIX"
+          fi
+          export BASERUBY="$BASERUBY_PREFIX/bin/ruby"
+          export PATH="$BASERUBY_PREFIX/bin:$PATH"
+          $BASERUBY --version
+          echo ""
+          echo "Step 2: Building target Ruby with static linking..."
+          cd "/tmp/src/ruby"
+          make distclean 2>/dev/null || true
+          if [ ! -f configure ]; then
+              echo "Generating configure script..."
+              ./autogen.sh
+              if [ ! -f tool/config.sub ]; then
+                  echo "Copying config.sub and config.guess..."
+                  cp -f /usr/share/misc/config.sub tool/config.sub || \
+                  cp -f /usr/share/automake-*/config.sub tool/config.sub || true
+                  cp -f /usr/share/misc/config.guess tool/config.guess || \
+                  cp -f /usr/share/automake-*/config.guess tool/config.guess || true
+                  chmod +x tool/config.sub tool/config.guess
+              fi
+          fi
+          echo "Configuring target Ruby with static linking..."
+          ./configure \
+              --prefix="/tmp/work/ruby-install" \
+              --disable-shared \
+              --enable-static \
+              --disable-install-doc \
+              --disable-install-rdoc \
+              --disable-install-capi \
+              --with-static-linked-ext \
+              --without-gmp \
+              --disable-dtrace \
+              --disable-jit-support \
+              --with-baseruby="$BASERUBY" \
+              ac_cv_func_backtrace=no
+          echo "Building Ruby static library..."
+          make -j$(nproc) V=1
+          if [ ! -f libruby-static.a ]; then
+              echo "ERROR: libruby-static.a not found after build"
+              ls -la
+              exit 1
+          fi
+          echo "libruby-static.a created successfully"
+          RUBY_BUILD_DIR="/tmp/src/ruby"
+          INC_RUBY="-I${RUBY_BUILD_DIR}/include -I${RUBY_BUILD_DIR}/.ext/include/x86_64-linux -I${RUBY_BUILD_DIR}"
+          LIBS_RUBY="${RUBY_BUILD_DIR}/libruby-static.a"
+          echo ""
+          echo "Ruby build complete!"
+          echo "Ruby include flags: $INC_RUBY"
+          echo "Ruby static library: $LIBS_RUBY"
+          echo ""
+          STANDARD_FUZZERS="fuzz_regex
+                            fuzz_string
+                            fuzz_hash
+                            fuzz_bignum
+                            fuzz_array
+                            fuzz_iseq
+                            fuzz_pack
+                            fuzz_ruby_parser
+                            fuzz_prism"
+          for fuzzer in $STANDARD_FUZZERS; do
+              echo "Building ${fuzzer}..."
+              EXTRA_INCLUDES=""
+              if [ "$fuzzer" = "fuzz_prism" ]; then
+                  EXTRA_INCLUDES="-I$RUBY_BUILD_DIR/prism"
+              fi
+              $CXX $CXXFLAGS $INC_RUBY $EXTRA_INCLUDES -c "/tmp/src/${fuzzer}.cpp" -o "/tmp/work/${fuzzer}.o"
+              $CXX $CXXFLAGS $LIB_FUZZING_ENGINE "/tmp/work/${fuzzer}.o" \
+                  $LIBS_RUBY -lm -lpthread -ldl -lcrypt -lz -o "$GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer}"
+          done
+          echo "Building fuzz_json..."
+          JSON_DIR="$RUBY_BUILD_DIR/ext/json"
+          $CC $CFLAGS $INC_RUBY -I"$JSON_DIR" \
+              -c "$JSON_DIR/vendor/fpconv.c" -o "/tmp/work/json_fpconv.o"
+          $CC $CFLAGS $INC_RUBY -I"$JSON_DIR" -I"$JSON_DIR/vendor" -I"$JSON_DIR/simd" \
+              -DHAVE_RB_ENC_INTERNED_STR -DHAVE_RB_HASH_BULK_INSERT -DHAVE_RB_HASH_NEW_CAPA \
+              -DHAVE_RB_STR_TO_INTERNED_STR -DHAVE_STRNLEN \
+              -c "/tmp/src/fuzz_json.c" -o "/tmp/work/fuzz_json.o"
+          $CXX $CXXFLAGS $LIB_FUZZING_ENGINE "/tmp/work/fuzz_json.o" "/tmp/work/json_fpconv.o" \
+              $LIBS_RUBY -lm -lpthread -ldl -lcrypt -lz -o "$GITHUB_WORKSPACE/build/fuzz-targets/fuzz_json"
+          if [ -n "${OSS_FUZZ_CI-}" ]
+          then
+          	echo "skipping copora in CI"
+          else
+              find "/tmp/src/ruby" -type f -name '*.rb' | head -n 1000 | zip -@ "$GITHUB_WORKSPACE/build/fuzz-targets/fuzz_ruby_parser_seed_corpus.zip"
+              find "/tmp/src/ruby" -type f -name '*.rb' | head -n 1000 | zip -@ "$GITHUB_WORKSPACE/build/fuzz-targets/fuzz_prism_seed_corpus.zip"
+          	find "/tmp/src/ruby" -type f -name '*.json' | head -n 100 | zip -@ "$GITHUB_WORKSPACE/build/fuzz-targets/fuzz_json_seed_corpus.zip"
+          fi
+          ALL_FUZZERS="fuzz_regex fuzz_string fuzz_hash fuzz_bignum fuzz_array fuzz_iseq fuzz_pack fuzz_ruby_parser fuzz_prism fuzz_json"
+          for fuzzer in $ALL_FUZZERS; do
+              cp "/tmp/src/ruby.options" "$GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer}.options"
+          done
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

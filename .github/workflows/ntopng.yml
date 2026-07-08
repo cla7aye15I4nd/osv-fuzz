@@ -1,0 +1,189 @@
+name: "Fuzz ntopng"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+
+env:
+  PROJECT: ntopng
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            bison \
+            flex \
+            groff \
+            libcurl4-openssl-dev \
+            libglib2.0-dev \
+            liblzma-dev \
+            libsqlite3-dev \
+            libtool \
+            libxml2-dev \
+            libzstd-dev \
+            ninja-build \
+            pkg-config
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/ntop/ntopng.git /tmp/src/ntopng
+          git clone --depth 1 https://github.com/google/libprotobuf-mutator.git /tmp/src/libprotobuf-mutator
+          git clone --depth 1 https://github.com/ntop/nDPI.git /tmp/src/nDPI
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE=""
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          cd /tmp/src/ntopng
+          CFLAGS_SAVE="$CFLAGS"
+          CXXFLAGS_SAVE="$CXXFLAGS"
+          unset CFLAGS
+          unset CXXFLAGS
+          export AFL_NOOPT=1
+          export CFLAGS="-Wno-error=unused-command-line-argument"
+          export CXXFLAGS="-stdlib=libc++ -Wno-error=unused-command-line-argument"
+          cd /tmp/src/libpcap-1.9.1
+          ./configure --disable-shared
+          make -j$(nproc)
+          make install
+          cd /tmp/src/zeromq-4.3.5
+          ./autogen.sh
+          (
+          export CXXFLAGS="-Wno-error=missing-braces -Wno-error=unused-command-line-argument -stdlib=libc++"
+          ./configure --without-documentation --without-libsodium --enable-static --disable-shared
+          make -j$(nproc)
+          make install
+          )
+          cd /tmp/src/json-c-json-c-0.17-20230812
+          mkdir build
+          cd build
+          cmake -DBUILD_SHARED_LIBS=OFF ..
+          make -j$(nproc)
+          make install
+          cd /tmp/src/libmaxminddb-1.7.1
+          ./configure --disable-shared --enable-static
+          make -j$(nproc)
+          make install
+          cd $NDPI_HOME
+          ./autogen.sh
+          ./configure
+          make -j$(nproc)
+          make -C $NTOPNG_HOME/third-party/lua-5.4.6 generic
+          cd $NTOPNG_HOME/third-party/rrdtool-1.4.8
+          ./configure --disable-libdbi --disable-libwrap --disable-rrdcgi --disable-libtool-lock \
+              --disable-nls --disable-rpath --disable-perl --disable-ruby --disable-lua \
+              --disable-tcl --disable-python --disable-dependency-tracking --disable-rrd_graph
+          cd src
+          make librrd_th.la
+          export CFLAGS="${CFLAGS_SAVE}"
+          export CXXFLAGS="${CXXFLAGS_SAVE}"
+          unset AFL_NOOPT
+          cd $NTOPNG_HOME
+          ./autogen.sh
+          ./configure --enable-fuzztargets --without-hiredis --with-zmq-static \
+              --with-json-c-static --with-maxminddb-static
+          make -j$(nproc) fuzz_all
+          find fuzz/ -regex 'fuzz/fuzz_[a-z_]*\(\.\(zip\|dict\|options\)\)?' -exec cp {} $GITHUB_WORKSPACE/build/fuzz-targets/ \;
+          mkdir -p $GITHUB_WORKSPACE/build/fuzz-targets/install $GITHUB_WORKSPACE/build/fuzz-targets/data-dir $GITHUB_WORKSPACE/build/fuzz-targets/docs $GITHUB_WORKSPACE/build/fuzz-targets/scripts/callbacks
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30
