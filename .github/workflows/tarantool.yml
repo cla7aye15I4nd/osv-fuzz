@@ -80,6 +80,7 @@ jobs:
           sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/tarantool
+          set +e
           [[ -e /tmp/src/tarantool/build ]] && rm -rf /tmp/src/tarantool/build
           export FUZZ_INTROSPECTOR_CONFIG=/tmp/src/fuzz_introspector_exclusion.config
           cat > $FUZZ_INTROSPECTOR_CONFIG <<EOF
@@ -177,6 +178,14 @@ jobs:
           cp $TARANTOOL_PATH "$GITHUB_WORKSPACE/build/fuzz-targets/$LUA_RUNTIME_NAME"
           cp -R $LUA_MODULES_DIR "$GITHUB_WORKSPACE/build/fuzz-targets/"
           rm -f "$GITHUB_WORKSPACE/build/fuzz-targets/compile_lua_fuzzer" "/tmp/src/compile_lua_fuzzer"
+          set -e
+          # Verify at least one fuzz target was built
+          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets"
+          if [ "$target_count" -eq 0 ]; then
+            echo "[!] No fuzz targets built — build failed"
+            exit 1
+          fi
 
       - name: Verify fuzz targets
         run: |

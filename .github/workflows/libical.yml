@@ -66,12 +66,21 @@ jobs:
           sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/libical
+          set +e
           cmake . -DLIBICAL_STATIC=ON -DLIBICAL_GLIB=False -DLIBICAL_GLIB_BUILD_DOCS=False -DLIBICAL_GOBJECT_INTROSPECTION=False -DLIBICAL_JAVA_BINDINGS=False -DLIBICAL_BUILD_TESTING=True
           make install -j$(nproc)
           $CXX $CXXFLAGS -std=c++11 /tmp/src/libical_fuzzer.cc $LIB_FUZZING_ENGINE /usr/local/lib/libical.a -o $GITHUB_WORKSPACE/build/fuzz-targets/libical_fuzzer
           $CXX $CXXFLAGS -std=c++11 /tmp/src/libical_extended_fuzzer.cc $LIB_FUZZING_ENGINE /usr/local/lib/libical.a -o $GITHUB_WORKSPACE/build/fuzz-targets/libical_extended_fuzzer
           $CXX $CXXFLAGS -std=c++11 /tmp/src/libicalvcard_fuzzer.cc $LIB_FUZZING_ENGINE /usr/local/lib/libicalvcard.a /usr/local/lib/libical.a -o $GITHUB_WORKSPACE/build/fuzz-targets/libicalvcard_fuzzer
           find . -name *.ics -print | zip -q $GITHUB_WORKSPACE/build/fuzz-targets/libical_fuzzer_seed_corpus.zip -@
+          set -e
+          # Verify at least one fuzz target was built
+          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets"
+          if [ "$target_count" -eq 0 ]; then
+            echo "[!] No fuzz targets built — build failed"
+            exit 1
+          fi
 
       - name: Verify fuzz targets
         run: |

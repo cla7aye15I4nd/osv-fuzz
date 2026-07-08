@@ -64,6 +64,7 @@ jobs:
           sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src
+          set +e
           find /usr/ -name "libyaml*.so" -exec rm {} \;
           find /usr/ -name "libyaml-0*" -exec rm {} \;
           export FUZZ_INTROSPECTOR_CONFIG=/tmp/src/fuzz_introspector_exclusion.config
@@ -166,6 +167,14 @@ jobs:
           cd /tmp/src/config_yaml_seeds
           find /tmp/src/fluent-bit/tests/internal/data/config_format/yaml -name "*.yaml" -exec cp {} . \;
           zip -rj $GITHUB_WORKSPACE/build/fuzz-targets/flb-it-fuzz-config_yaml_fuzzer_OSSFUZZ_seed_corpus.zip /tmp/src/config_yaml_seeds/*
+          set -e
+          # Verify at least one fuzz target was built
+          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets"
+          if [ "$target_count" -eq 0 ]; then
+            echo "[!] No fuzz targets built — build failed"
+            exit 1
+          fi
 
       - name: Verify fuzz targets
         run: |

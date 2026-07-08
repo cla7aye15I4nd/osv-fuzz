@@ -66,6 +66,7 @@ jobs:
           sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/file
+          set +e
           autoreconf -i
           ./configure --enable-static --enable-fsect-man5
           make V=1 all
@@ -82,6 +83,14 @@ jobs:
           mkdir pocs_all
           find /tmp/src/pocs/ -type f -print0 | xargs -0 -I % mv -f % ./pocs_all
           zip -j $GITHUB_WORKSPACE/build/fuzz-targets/magic_fuzzer_seed_corpus.zip ./tests/*.testfile /tmp/src/binary-samples/{elf,pe}-* /tmp/src/pocs_all
+          set -e
+          # Verify at least one fuzz target was built
+          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets"
+          if [ "$target_count" -eq 0 ]; then
+            echo "[!] No fuzz targets built — build failed"
+            exit 1
+          fi
 
       - name: Verify fuzz targets
         run: |

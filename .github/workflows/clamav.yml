@@ -67,6 +67,7 @@ jobs:
           sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/clamav
+          set +e
           set -ex
           export GIT_DISCOVERY_ACROSS_FILESYSTEM=1
           rm -rf /tmp/src/build
@@ -114,6 +115,14 @@ jobs:
               zip $GITHUB_WORKSPACE/build/fuzz-targets/clamav_dbload_${type}_fuzzer_seed_corpus.zip /tmp/src/clamav-fuzz-corpus/database/${type}/*
               cp /tmp/src/clamav-fuzz-corpus/database/${type}.dict $GITHUB_WORKSPACE/build/fuzz-targets/clamav_dbload_${type}_fuzzer.dict 2>/dev/null || :
           done
+          set -e
+          # Verify at least one fuzz target was built
+          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets"
+          if [ "$target_count" -eq 0 ]; then
+            echo "[!] No fuzz targets built — build failed"
+            exit 1
+          fi
 
       - name: Verify fuzz targets
         run: |

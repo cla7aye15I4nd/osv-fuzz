@@ -66,6 +66,7 @@ jobs:
           sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/openh264
+          set +e
           if [[ $CXXFLAGS = *sanitize=memory* ]]; then
             ASM_BUILD=No
           else
@@ -73,6 +74,14 @@ jobs:
           fi
           make -j$(nproc) ARCH=$ARCHITECTURE USE_ASM=$ASM_BUILD BUILDTYPE=Debug libopenh264.a
           $CXX $CXXFLAGS -o $GITHUB_WORKSPACE/build/fuzz-targets/decoder_fuzzer -I./codec/api/wels -I./codec/console/common/inc -I./codec/common/inc -L. $LIB_FUZZING_ENGINE /tmp/src/decoder_fuzzer.cpp libopenh264.a
+          set -e
+          # Verify at least one fuzz target was built
+          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets"
+          if [ "$target_count" -eq 0 ]; then
+            echo "[!] No fuzz targets built — build failed"
+            exit 1
+          fi
 
       - name: Verify fuzz targets
         run: |

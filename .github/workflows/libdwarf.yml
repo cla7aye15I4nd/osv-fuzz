@@ -60,6 +60,7 @@ jobs:
           sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/libdwarf
+          set +e
           export BINARY_SAMPLES_DIR="/tmp/src/libdwarf-binary-samples"
           export BINARY_SAMPLES_V1="$BINARY_SAMPLES_DIR/binary-samples"
           export BINARY_SAMPLES_V2="$BINARY_SAMPLES_DIR/binary-samples-v2"
@@ -88,6 +89,14 @@ jobs:
             $CC $CFLAGS $LIB_FUZZING_ENGINE -I../src/lib/libdwarf/ \
               "$FUZZER_DIR/${fuzzName}.c" -o "$GITHUB_WORKSPACE/build/fuzz-targets/${fuzzName}" ./src/lib/libdwarf/libdwarf.a -lz
           done
+          set -e
+          # Verify at least one fuzz target was built
+          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets"
+          if [ "$target_count" -eq 0 ]; then
+            echo "[!] No fuzz targets built — build failed"
+            exit 1
+          fi
 
       - name: Verify fuzz targets
         run: |

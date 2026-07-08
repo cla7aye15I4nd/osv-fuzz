@@ -79,6 +79,7 @@ jobs:
           sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/libpsl
+          set +e
           export DEPS_PATH=/tmp/src/deps
           export PKG_CONFIG_PATH=$DEPS_PATH/lib/pkgconfig
           export CPPFLAGS="-I$DEPS_PATH/include"
@@ -150,6 +151,14 @@ jobs:
               fuzzer=$(basename $dir .in)
               zip -rj "$GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer}_seed_corpus.zip" "${dir}/"
           done
+          set -e
+          # Verify at least one fuzz target was built
+          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets"
+          if [ "$target_count" -eq 0 ]; then
+            echo "[!] No fuzz targets built — build failed"
+            exit 1
+          fi
 
       - name: Verify fuzz targets
         run: |

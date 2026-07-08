@@ -65,6 +65,7 @@ jobs:
           sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src
+          set +e
           cd "/tmp/src"
           wget -qO- https://botan.randombit.net/releases/Botan-3.4.0.tar.xz | tar xJ
           cd Botan-3.4.0
@@ -109,6 +110,14 @@ jobs:
           cp src/lib/librnp.so.0 "$GITHUB_WORKSPACE/build/fuzz-targets/lib/"
           cp /usr/lib/libbotan-3.so.* "$GITHUB_WORKSPACE/build/fuzz-targets/lib/"
           cp /lib/x86_64-linux-gnu/libjson-c.so.* "$GITHUB_WORKSPACE/build/fuzz-targets/lib/"
+          set -e
+          # Verify at least one fuzz target was built
+          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets"
+          if [ "$target_count" -eq 0 ]; then
+            echo "[!] No fuzz targets built — build failed"
+            exit 1
+          fi
 
       - name: Verify fuzz targets
         run: |

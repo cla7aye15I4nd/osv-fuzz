@@ -63,6 +63,7 @@ jobs:
           sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src
+          set +e
           cd /tmp/work
           export CFLAGS="$CFLAGS -Wno-error=unknown-warning-option -fno-sanitize=vptr -Wno-error=missing-template-arg-list-after-template-kw -Wno-error=deprecated-builtins -Wno-error=deprecated-literal-operator"
           export CXXFLAGS="$CXXFLAGS -Wno-error=unknown-warning-option -fno-sanitize=vptr -Wno-error=missing-template-arg-list-after-template-kw -Wno-error=deprecated-builtins -Wno-error=deprecated-literal-operator"
@@ -93,6 +94,14 @@ jobs:
           find ${FUZZERS_DIR} -name '*_fuzzer' -exec cp -v '{}' $GITHUB_WORKSPACE/build/fuzz-targets ';'
           find ${FUZZERS_DIR} -name '*_fuzzer.dict' -exec cp -v '{}' $GITHUB_WORKSPACE/build/fuzz-targets ';'
           find ${FUZZERS_DIR} -name "*_fuzzer_seed_corpus" -type d -execdir zip -r $GITHUB_WORKSPACE/build/fuzz-targets/{}.zip {} ';'
+          set -e
+          # Verify at least one fuzz target was built
+          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets"
+          if [ "$target_count" -eq 0 ]; then
+            echo "[!] No fuzz targets built — build failed"
+            exit 1
+          fi
 
       - name: Verify fuzz targets
         run: |

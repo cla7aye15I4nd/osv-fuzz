@@ -66,6 +66,7 @@ jobs:
           sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/libgit2
+          set +e
           sed -i "s/add_clar_test(libgit2_tests online /#add_clar_test(libgit2_tests online/g" tests/libgit2/CMakeLists.txt
           sed -i "s/add_clar_test(libgit2_tests prox/#add_clar_test(libgit2_tests prox/g" tests/libgit2/CMakeLists.txt
           sed -i "s/add_clar_test(libgit2_tests auth_clone/#add_clar_test(libgit2_tests auth_clone/g" tests/libgit2/CMakeLists.txt
@@ -98,6 +99,14 @@ jobs:
               zip -j "$GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer_name}_seed_corpus.zip" \
                   ../fuzzers/corpora/${fuzzer_name%_fuzzer}/*
           done
+          set -e
+          # Verify at least one fuzz target was built
+          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets"
+          if [ "$target_count" -eq 0 ]; then
+            echo "[!] No fuzz targets built — build failed"
+            exit 1
+          fi
 
       - name: Verify fuzz targets
         run: |

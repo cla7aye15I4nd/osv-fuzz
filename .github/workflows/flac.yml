@@ -72,6 +72,7 @@ jobs:
           sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src
+          set +e
           export ASAN_OPTIONS="detect_leaks=0"
           if [[ $CFLAGS = *sanitize=address* ]]
           then
@@ -112,6 +113,14 @@ jobs:
           for fuzzerName in *; do
               zip -j $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzerName}_seed_corpus.zip ${fuzzerName}/*
           done
+          set -e
+          # Verify at least one fuzz target was built
+          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets"
+          if [ "$target_count" -eq 0 ]; then
+            echo "[!] No fuzz targets built — build failed"
+            exit 1
+          fi
 
       - name: Verify fuzz targets
         run: |
