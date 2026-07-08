@@ -35,6 +35,7 @@ jobs:
             flex \
             libgmp-dev \
             libmpfr-dev \
+            libzstd-dev \
             texinfo
 
       - name: Clone source
@@ -93,7 +94,7 @@ jobs:
           mkdir fuzz
           cp ../fuzz_*.c fuzz/
           cd fuzz
-          LIBS="../opcodes/libopcodes.a ../libctf/.libs/libctf.a ../bfd/.libs/libbfd.a ../zlib/libz.a ../libsframe/.libs/libsframe.a ../libiberty/libiberty.a"
+          LIBS="../opcodes/libopcodes.a ../libctf/.libs/libctf.a ../bfd/.libs/libbfd.a ../zlib/libz.a ../libsframe/.libs/libsframe.a ../libiberty/libiberty.a -lzstd"
           for i in fuzz_disassemble fuzz_bfd fuzz_bfd_ext; do
               $CC $CFLAGS -I ../include -I ../bfd -I ../opcodes -c $i.c -o $i.o
               $CXX $CXXFLAGS $i.o -o $GITHUB_WORKSPACE/build/fuzz-targets/$i $LIB_FUZZING_ENGINE -Wl,--start-group ${LIBS} -Wl,--end-group

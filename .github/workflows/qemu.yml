@@ -37,9 +37,11 @@ jobs:
             libattr1-dev \
             libcap-ng-dev \
             libfdt-dev \
+            libglib2.0-dev \
             libpixman-1-dev \
             libslirp-dev \
             libtool \
+            meson \
             ninja-build \
             patchelf \
             pkg-config \
@@ -48,13 +50,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://gitlab.gnome.org/GNOME/glib.git /tmp/src/--branch=$glib_tag
-          git clone --depth 1 --recursive https://git.qemu.org/git/qemu.git /tmp/src/qemu
-
-      - name: Download fuzzer files from oss-fuzz
-        run: |
-          mkdir -p /tmp/src
-          curl -sL -o /tmp/src/replay_build.sh "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/qemu/replay_build.sh"
+          git clone --depth 1 https://git.qemu.org/git/qemu.git /tmp/src/qemu
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -78,7 +74,6 @@ jobs:
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/qemu
           set +e
-          cd /tmp/src/qemu/
           /tmp/src/qemu/scripts/oss-fuzz/build.sh
           set -e
           # Verify at least one fuzz target was built
