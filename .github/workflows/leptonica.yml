@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 10 * * 0"
 
 env:
   PROJECT: leptonica
@@ -38,14 +40,14 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/DanBloomberg/leptonica.git /tmp/src/leptonica
-          git clone --depth 1 https://github.com/madler/zlib.git /tmp/src/zlib
-          git clone --depth 1 https://gitlab.com/libtiff/libtiff /tmp/src/libtiff
-          git clone --depth 1 https://github.com/glennrp/libpng.git /tmp/src/libpng
-          git clone --depth 1 https://chromium.googlesource.com/webm/libwebp /tmp/src/libwebp
-          git clone --depth 1 https://www.cl.cam.ac.uk/~mgk25/git/jbigkit /tmp/src/jbigkit
-          git clone --depth 1 https://github.com/libjpeg-turbo/libjpeg-turbo /tmp/src/libjpeg-turbo
-          git clone --depth 1 https://github.com/facebook/zstd /tmp/src/zstd
+          git clone --depth 1 --recursive https://github.com/DanBloomberg/leptonica.git /tmp/src/leptonica
+          git clone --depth 1 --recursive https://github.com/madler/zlib.git /tmp/src/zlib
+          git clone --depth 1 --recursive https://gitlab.com/libtiff/libtiff /tmp/src/libtiff
+          git clone --depth 1 --recursive https://github.com/glennrp/libpng.git /tmp/src/libpng
+          git clone --depth 1 --recursive https://chromium.googlesource.com/webm/libwebp /tmp/src/libwebp
+          git clone --depth 1 --recursive https://www.cl.cam.ac.uk/~mgk25/git/jbigkit /tmp/src/jbigkit
+          git clone --depth 1 --recursive https://github.com/libjpeg-turbo/libjpeg-turbo /tmp/src/libjpeg-turbo
+          git clone --depth 1 --recursive https://github.com/facebook/zstd /tmp/src/zstd
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -61,6 +63,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/leptonica
           /tmp/src/leptonica/prog/fuzzing/oss-fuzz-build.sh
 

@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 11 * * 0"
 
 env:
   PROJECT: boost
@@ -28,13 +30,23 @@ jobs:
       - name: Install AFL++ and dependencies
         run: |
           bash scripts/setup_aflpp.sh
-          sudo apt-get install -y -qq \
-            python
 
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/boostorg/boost.git /tmp/src/boost
+          git clone --depth 1 --recursive https://github.com/boostorg/boost.git /tmp/src/boost
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          # Pattern: *.zip — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/boost" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.zip', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          # Pattern: *.cc — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/boost" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.cc', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -50,6 +62,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/boost
           cp "/usr/local/include/x86_64-unknown-linux-gnu/c++/v1/__config_site" "/usr/local/include/c++/v1/"
           CXXFLAGS="$CXXFLAGS -stdlib=libc++ -pthread" LDFLAGS="-stdlib=libc++" \

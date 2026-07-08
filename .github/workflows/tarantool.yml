@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 15 * * 0"
 
 env:
   PROJECT: tarantool
@@ -50,8 +52,13 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/tarantool/tarantool /tmp/src/tarantool
-          git clone --depth 1 https://github.com/ligurio/tarantool-corpus /tmp/src/test/static
+          git clone --depth 1 --recursive https://github.com/tarantool/tarantool /tmp/src/tarantool
+          git clone --depth 1 --recursive https://github.com/ligurio/tarantool-corpus /tmp/src/test/static
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/compile_lua_fuzzer "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tarantool/compile_lua_fuzzer"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -67,6 +74,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/tarantool
           [[ -e /tmp/src/tarantool/build ]] && rm -rf /tmp/src/tarantool/build
           export FUZZ_INTROSPECTOR_CONFIG=/tmp/src/fuzz_introspector_exclusion.config

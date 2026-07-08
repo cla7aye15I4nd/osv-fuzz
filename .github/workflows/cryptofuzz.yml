@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 22 * * 0"
 
 env:
   PROJECT: cryptofuzz
@@ -48,33 +50,38 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/golang/go /tmp/src/go-dev
-          git clone --depth 1 https://github.com/golang/crypto /tmp/src/go-crypto
-          git clone --depth 1 https://github.com/golang/sys.git /tmp/src/go-sys
-          git clone --depth 1 https://github.com/guidovranken/cryptofuzz /tmp/src/cryptofuzz
-          git clone --depth 1 https://github.com/guidovranken/cryptofuzz-corpora /tmp/src/cryptofuzz-corpora
-          git clone --depth 1 https://github.com/openssl/openssl /tmp/src/openssl
-          git clone --depth 1 https://boringssl.googlesource.com/boringssl /tmp/src/boringssl
-          git clone --depth 1 git://git.gnupg.org/libgcrypt.git /tmp/src/libgcrypt
-          git clone --depth 1 https://github.com/weidai11/cryptopp/ /tmp/src/cryptopp
-          git clone --depth 1 https://github.com/google/cityhash.git /tmp/src/cityhash
-          git clone --depth 1 https://github.com/randombit/botan.git /tmp/src/botan
-          git clone --depth 1 https://github.com/wolfSSL/wolfssl.git /tmp/src/wolfssl
-          git clone --depth 1 https://github.com/wolfSSL/wolfsm /tmp/src/wolfsm
-          git clone --depth 1 https://github.com/jedisct1/libsodium.git /tmp/src/libsodium
-          git clone --depth 1 https://github.com/libtom/libtomcrypt.git /tmp/src/libtomcrypt
-          git clone --depth 1 https://github.com/microsoft/SymCrypt.git /tmp/src/SymCrypt
-          git clone --depth 1 https://github.com/indutny/bn.js.git /tmp/src/bn.js
-          git clone --depth 1 https://github.com/MikeMcl/bignumber.js.git /tmp/src/bignumber.js
-          git clone --depth 1 https://github.com/guidovranken/libfuzzer-js.git /tmp/src/libfuzzer-js
-          git clone --depth 1 https://github.com/brix/crypto-js.git /tmp/src/crypto-js
-          git clone --depth 1 https://github.com/trezor/trezor-firmware.git /tmp/src/trezor-firmware
-          git clone --depth 1 https://github.com/Cyan4973/xxHash.git /tmp/src/xxHash
-          git clone --depth 1 https://github.com/paulmillr/noble-ed25519.git /tmp/src/noble-ed25519
-          git clone --depth 1 https://github.com/paulmillr/noble-bls12-381.git /tmp/src/noble-bls12-381
-          git clone --depth 1 https://github.com/paulmillr/noble-secp256k1.git /tmp/src/noble-secp256k1
-          git clone --depth 1 https://github.com/supranational/blst.git /tmp/src/blst
-          git clone --depth 1 https://github.com/bitcoin-core/secp256k1.git /tmp/src/secp256k1
+          git clone --depth 1 --recursive https://github.com/golang/go /tmp/src/go-dev
+          git clone --depth 1 --recursive https://github.com/golang/crypto /tmp/src/go-crypto
+          git clone --depth 1 --recursive https://github.com/golang/sys.git /tmp/src/go-sys
+          git clone --depth 1 --recursive https://github.com/guidovranken/cryptofuzz /tmp/src/cryptofuzz
+          git clone --depth 1 --recursive https://github.com/guidovranken/cryptofuzz-corpora /tmp/src/cryptofuzz-corpora
+          git clone --depth 1 --recursive https://github.com/openssl/openssl /tmp/src/openssl
+          git clone --depth 1 --recursive https://boringssl.googlesource.com/boringssl /tmp/src/boringssl
+          git clone --depth 1 --recursive git://git.gnupg.org/libgcrypt.git /tmp/src/libgcrypt
+          git clone --depth 1 --recursive https://github.com/weidai11/cryptopp/ /tmp/src/cryptopp
+          git clone --depth 1 --recursive https://github.com/google/cityhash.git /tmp/src/cityhash
+          git clone --depth 1 --recursive https://github.com/randombit/botan.git /tmp/src/botan
+          git clone --depth 1 --recursive https://github.com/wolfSSL/wolfssl.git /tmp/src/wolfssl
+          git clone --depth 1 --recursive https://github.com/wolfSSL/wolfsm /tmp/src/wolfsm
+          git clone --depth 1 --recursive https://github.com/jedisct1/libsodium.git /tmp/src/libsodium
+          git clone --depth 1 --recursive https://github.com/libtom/libtomcrypt.git /tmp/src/libtomcrypt
+          git clone --depth 1 --recursive https://github.com/microsoft/SymCrypt.git /tmp/src/SymCrypt
+          git clone --depth 1 --recursive https://github.com/indutny/bn.js.git /tmp/src/bn.js
+          git clone --depth 1 --recursive https://github.com/MikeMcl/bignumber.js.git /tmp/src/bignumber.js
+          git clone --depth 1 --recursive https://github.com/guidovranken/libfuzzer-js.git /tmp/src/libfuzzer-js
+          git clone --depth 1 --recursive https://github.com/brix/crypto-js.git /tmp/src/crypto-js
+          git clone --depth 1 --recursive https://github.com/trezor/trezor-firmware.git /tmp/src/trezor-firmware
+          git clone --depth 1 --recursive https://github.com/Cyan4973/xxHash.git /tmp/src/xxHash
+          git clone --depth 1 --recursive https://github.com/paulmillr/noble-ed25519.git /tmp/src/noble-ed25519
+          git clone --depth 1 --recursive https://github.com/paulmillr/noble-bls12-381.git /tmp/src/noble-bls12-381
+          git clone --depth 1 --recursive https://github.com/paulmillr/noble-secp256k1.git /tmp/src/noble-secp256k1
+          git clone --depth 1 --recursive https://github.com/supranational/blst.git /tmp/src/blst
+          git clone --depth 1 --recursive https://github.com/bitcoin-core/secp256k1.git /tmp/src/secp256k1
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/xxd.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/cryptofuzz/xxd.c"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -90,6 +97,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src
           export CXXFLAGS="$CXXFLAGS -D_LIBCPP_DEBUG=1"
           export GO111MODULE=off

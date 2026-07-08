@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 2 * * 0"
 
 env:
   PROJECT: libvips
@@ -43,22 +45,22 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/libvips/libvips.git /tmp/src/libvips
-          git clone --depth 1 https://github.com/libvips/seed-corpora.git /tmp/src/seed-corpora
-          git clone --depth 1 https://github.com/madler/zlib.git /tmp/src/zlib
-          git clone --depth 1 https://github.com/libexif/libexif.git /tmp/src/libexif
-          git clone --depth 1 https://github.com/mm2/Little-CMS.git /tmp/src/lcms
-          git clone --depth 1 https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/src/libjpeg-turbo
-          git clone --depth 1 https://github.com/pnggroup/libpng.git /tmp/src/libpng
-          git clone --depth 1 https://chromium.googlesource.com/webm/libwebp /tmp/src/libwebp
-          git clone --depth 1 https://gitlab.com/libtiff/libtiff.git /tmp/src/libtiff
-          git clone --depth 1 https://aomedia.googlesource.com/aom /tmp/src/aom
-          git clone --depth 1 https://github.com/strukturag/libheif.git /tmp/src/libheif
-          git clone --depth 1 https://github.com/libjxl/libjxl.git /tmp/src/libjxl
-          git clone --depth 1 https://github.com/lovell/libimagequant.git /tmp/src/libimagequant
-          git clone --depth 1 https://github.com/dloebl/cgif.git /tmp/src/cgif
-          git clone --depth 1 https://github.com/google/highway.git /tmp/src/highway
-          git clone --depth 1 https://github.com/google/libultrahdr.git /tmp/src/libultrahdr
+          git clone --depth 1 --recursive https://github.com/libvips/libvips.git /tmp/src/libvips
+          git clone --depth 1 --recursive https://github.com/libvips/seed-corpora.git /tmp/src/seed-corpora
+          git clone --depth 1 --recursive https://github.com/madler/zlib.git /tmp/src/zlib
+          git clone --depth 1 --recursive https://github.com/libexif/libexif.git /tmp/src/libexif
+          git clone --depth 1 --recursive https://github.com/mm2/Little-CMS.git /tmp/src/lcms
+          git clone --depth 1 --recursive https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/src/libjpeg-turbo
+          git clone --depth 1 --recursive https://github.com/pnggroup/libpng.git /tmp/src/libpng
+          git clone --depth 1 --recursive https://chromium.googlesource.com/webm/libwebp /tmp/src/libwebp
+          git clone --depth 1 --recursive https://gitlab.com/libtiff/libtiff.git /tmp/src/libtiff
+          git clone --depth 1 --recursive https://aomedia.googlesource.com/aom /tmp/src/aom
+          git clone --depth 1 --recursive https://github.com/strukturag/libheif.git /tmp/src/libheif
+          git clone --depth 1 --recursive https://github.com/libjxl/libjxl.git /tmp/src/libjxl
+          git clone --depth 1 --recursive https://github.com/lovell/libimagequant.git /tmp/src/libimagequant
+          git clone --depth 1 --recursive https://github.com/dloebl/cgif.git /tmp/src/cgif
+          git clone --depth 1 --recursive https://github.com/google/highway.git /tmp/src/highway
+          git clone --depth 1 --recursive https://github.com/google/libultrahdr.git /tmp/src/libultrahdr
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -74,6 +76,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/libvips
           ./fuzz/oss_fuzz_build.sh
 

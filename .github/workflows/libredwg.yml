@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
 
 env:
   PROJECT: libredwg
@@ -36,7 +38,12 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/LibreDWG/libredwg /tmp/src/libredwg
+          git clone --depth 1 --recursive https://github.com/LibreDWG/libredwg /tmp/src/libredwg
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/llvmfuzz.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libredwg/llvmfuzz.options"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -52,6 +59,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/libredwg
           if [[ "$SANITIZER" == introspector ]]; then
             export CFLAGS="${CFLAGS} -Wno-error"

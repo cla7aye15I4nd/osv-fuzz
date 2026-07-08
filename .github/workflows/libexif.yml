@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 20 * * 0"
 
 env:
   PROJECT: libexif
@@ -38,8 +40,14 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/libexif/libexif /tmp/src/libexif
-          git clone --depth 1 https://github.com/ianare/exif-samples /tmp/src/exif-samples
+          git clone --depth 1 --recursive https://github.com/libexif/libexif /tmp/src/libexif
+          git clone --depth 1 --recursive https://github.com/ianare/exif-samples /tmp/src/exif-samples
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/exif_loader_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libexif/exif_loader_fuzzer.cc"
+          curl -sL -o /tmp/src/exif_from_data_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libexif/exif_from_data_fuzzer.cc"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -55,6 +63,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/libexif
           autoreconf -fiv
           ./configure --disable-docs --enable-shared=no --prefix="/tmp/work"

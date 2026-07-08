@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 3 * * 0"
 
 env:
   PROJECT: dnsmasq
@@ -36,7 +38,24 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 git://thekelleys.org.uk/dnsmasq.git /tmp/src/dnsmasq
+          git clone --depth 1 --recursive git://thekelleys.org.uk/dnsmasq.git /tmp/src/dnsmasq
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          # Pattern: fuzz*.c — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/dnsmasq" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'fuzz.*\\.c', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          # Pattern: fuzz*.cc — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/dnsmasq" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'fuzz.*\\.cc', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          # Pattern: fuzz*.h — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/dnsmasq" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'fuzz.*\\.h', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          curl -sL -o /tmp/src/fuzz_patch.patch "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dnsmasq/fuzz_patch.patch"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -52,6 +71,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/dnsmasq
           export ASAN_OPTIONS="detect_leaks=0"
           export OSS_CFLAGS="$CFLAGS -g"

@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 17 * * 0"
 
 env:
   PROJECT: fluent-bit
@@ -38,9 +40,9 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/fluent/fluent-bit/ /tmp/src/fluent-bit
-          git clone --depth 1 https://github.com/fluent/ctraces /tmp/src/ctraces
-          git clone --depth 1 https://github.com/fluent/cmetrics /tmp/src/cmetrics
+          git clone --depth 1 --recursive https://github.com/fluent/fluent-bit/ /tmp/src/fluent-bit
+          git clone --depth 1 --recursive https://github.com/fluent/ctraces /tmp/src/ctraces
+          git clone --depth 1 --recursive https://github.com/fluent/cmetrics /tmp/src/cmetrics
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -56,6 +58,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src
           find /usr/ -name "libyaml*.so" -exec rm {} \;
           find /usr/ -name "libyaml-0*" -exec rm {} \;

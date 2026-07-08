@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 6 * * 0"
 
 env:
   PROJECT: gnutls
@@ -43,15 +45,14 @@ jobs:
             lzip \
             mercurial \
             pkg-config \
-            python \
             texinfo
 
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 git://git.savannah.gnu.org/gnulib.git /tmp/src/gnulib
-          git clone --depth 1 https://git.lysator.liu.se/nettle/nettle.git /tmp/src/--branch=nettle_3.10.1_release_20241230
-          git clone --depth 1 https://gitlab.com/gnutls/gnutls.git /tmp/src/||
+          git clone --depth 1 --recursive git://git.savannah.gnu.org/gnulib.git /tmp/src/gnulib
+          git clone --depth 1 --recursive https://git.lysator.liu.se/nettle/nettle.git /tmp/src/--branch=nettle_3.10.1_release_20241230
+          git clone --depth 1 --recursive https://gitlab.com/gnutls/gnutls.git /tmp/src/||
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -67,6 +68,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/gnutls
           export DEPS_PATH=/tmp/src/deps
           export PKG_CONFIG_PATH=$DEPS_PATH/lib64/pkgconfig:$DEPS_PATH/lib/pkgconfig

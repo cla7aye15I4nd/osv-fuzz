@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 5 * * 0"
 
 env:
   PROJECT: gnupg
@@ -40,12 +42,21 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 git://git.gnupg.org/libgpg-error.git /tmp/src/libgpg-error
-          git clone --depth 1 git://git.gnupg.org/libgcrypt.git /tmp/src/libgcrypt
-          git clone --depth 1 git://git.gnupg.org/libassuan.git /tmp/src/libassuan
-          git clone --depth 1 git://git.gnupg.org/libksba.git /tmp/src/libksba
-          git clone --depth 1 git://git.gnupg.org/npth.git /tmp/src/npth
-          git clone --depth 1 git://git.gnupg.org/gnupg.git /tmp/tmp/src/gnupg
+          git clone --depth 1 --recursive git://git.gnupg.org/libgpg-error.git /tmp/src/libgpg-error
+          git clone --depth 1 --recursive git://git.gnupg.org/libgcrypt.git /tmp/src/libgcrypt
+          git clone --depth 1 --recursive git://git.gnupg.org/libassuan.git /tmp/src/libassuan
+          git clone --depth 1 --recursive git://git.gnupg.org/libksba.git /tmp/src/libksba
+          git clone --depth 1 --recursive git://git.gnupg.org/npth.git /tmp/src/npth
+          git clone --depth 1 --recursive git://git.gnupg.org/gnupg.git /tmp/tmp/src/gnupg
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          # Pattern: fuzz_* — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/gnupg" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'fuzz_.*', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          curl -sL -o /tmp/src/fuzzer_stubs.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/gnupg/fuzzer_stubs.c"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -61,6 +72,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/gnupg
           cd /src/gnupg
           ./autogen.sh  

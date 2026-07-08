@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 23 * * 0"
 
 env:
   PROJECT: p11-kit
@@ -43,7 +45,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/p11-glue/p11-kit.git /tmp/src/p11-kit
+          git clone --depth 1 --recursive https://github.com/p11-glue/p11-kit.git /tmp/src/p11-kit
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -59,6 +61,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/p11-kit
           ./autogen.sh
           make -j$(nproc) common/basic.asn.h common/openssl.asn.h common/pkix.asn.h

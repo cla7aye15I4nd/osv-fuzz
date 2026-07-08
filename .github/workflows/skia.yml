@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 4 * * 0"
 
 env:
   PROJECT: skia
@@ -40,8 +42,15 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 'https://chromium.googlesource.com/chromium/tools/depot_tools.git' /tmp/src/--depth
-          git clone --depth 1 https://skia.googlesource.com/skia.git /tmp/src/--depth
+          git clone --depth 1 --recursive 'https://chromium.googlesource.com/chromium/tools/depot_tools.git' /tmp/src/--depth
+          git clone --depth 1 --recursive https://skia.googlesource.com/skia.git /tmp/src/--depth
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/image_filter_deserialize_width.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/skia/image_filter_deserialize_width.options"
+          curl -sL -o /tmp/src/json.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/skia/json.dict"
+          curl -sL -o /tmp/src/sksl.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/skia/sksl.dict"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -57,6 +66,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/skia
           DISABLE="-Wno-zero-as-null-pointer-constant -Wno-unused-template
                    -Wno-cast-qual"

@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 21 * * 0"
 
 env:
   PROJECT: xs
@@ -32,10 +34,15 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/dvyukov/go-fuzz-corpus /tmp/src/&&
-          git clone --depth 1 https://github.com/google/fuzzing /tmp/src/&&
-          git clone --depth 1 https://github.com/tc39/test262 /tmp/src/&&
-          git clone --depth 1 https://github.com/Moddable-OpenSource/moddable /tmp/src/moddable
+          git clone --depth 1 --recursive https://github.com/dvyukov/go-fuzz-corpus /tmp/src/&&
+          git clone --depth 1 --recursive https://github.com/google/fuzzing /tmp/src/&&
+          git clone --depth 1 --recursive https://github.com/tc39/test262 /tmp/src/&&
+          git clone --depth 1 --recursive https://github.com/Moddable-OpenSource/moddable /tmp/src/moddable
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/xst.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/xs/xst.options"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -51,6 +58,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/moddable
           mv /tmp/src/{*.zip,*.dict} $GITHUB_WORKSPACE/build/fuzz-targets
           export MODDABLE=$PWD

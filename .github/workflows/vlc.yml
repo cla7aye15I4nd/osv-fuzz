@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 6 * * 0"
 
 env:
   PROJECT: vlc
@@ -48,8 +50,14 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://code.videolan.org/videolan/vlc.git /tmp/src/vlc
-          git clone --depth 1 https://code.videolan.org/VideoLAN.org/vlc-fuzz-corpus.git /tmp/src/vlc/fuzz-corpus
+          git clone --depth 1 --recursive https://code.videolan.org/videolan/vlc.git /tmp/src/vlc
+          git clone --depth 1 --recursive https://code.videolan.org/VideoLAN.org/vlc-fuzz-corpus.git /tmp/src/vlc/fuzz-corpus
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/fuzzing-modules.patch "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/vlc/fuzzing-modules.patch"
+          curl -sL -o /tmp/src/generate_seeds.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/vlc/generate_seeds.py"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -65,6 +73,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/vlc
           CFLAGS_SAVE="$CFLAGS"
           CXXFLAGS_SAVE="$CXXFLAGS"

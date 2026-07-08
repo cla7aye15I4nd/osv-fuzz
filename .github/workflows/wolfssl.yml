@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 17 * * 0"
 
 env:
   PROJECT: wolfssl
@@ -33,20 +35,19 @@ jobs:
             automake \
             bsdmainutils \
             libtool \
-            python \
             zip
 
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/wolfssl/wolfssl /tmp/tmp/src/wolfssl
-          git clone --depth 1 https://github.com/wolfSSL/wolfsm /tmp/src/wolfsm
-          git clone --depth 1 https://github.com/wolfSSL/wolfssh.git /tmp/src/wolfssh
-          git clone --depth 1 https://github.com/JacobBarthelmeh/fuzzing-headers.git /tmp/src/fuzzing-headers
-          git clone --depth 1 https://github.com/JacobBarthelmeh/wolf-ssl-ssh-fuzzers /tmp/src/wolf-ssl-ssh-fuzzers
-          git clone --depth 1 https://github.com/MozillaSecurity/cryptofuzz /tmp/src/cryptofuzz
-          git clone --depth 1 https://github.com/google/wycheproof.git /tmp/src/wycheproof
-          git clone --depth 1 https://github.com/wolfssl/oss-fuzz-targets /tmp/src/--depth
+          git clone --depth 1 --recursive https://github.com/wolfssl/wolfssl /tmp/tmp/src/wolfssl
+          git clone --depth 1 --recursive https://github.com/wolfSSL/wolfsm /tmp/src/wolfsm
+          git clone --depth 1 --recursive https://github.com/wolfSSL/wolfssh.git /tmp/src/wolfssh
+          git clone --depth 1 --recursive https://github.com/JacobBarthelmeh/fuzzing-headers.git /tmp/src/fuzzing-headers
+          git clone --depth 1 --recursive https://github.com/JacobBarthelmeh/wolf-ssl-ssh-fuzzers /tmp/src/wolf-ssl-ssh-fuzzers
+          git clone --depth 1 --recursive https://github.com/MozillaSecurity/cryptofuzz /tmp/src/cryptofuzz
+          git clone --depth 1 --recursive https://github.com/google/wycheproof.git /tmp/src/wycheproof
+          git clone --depth 1 --recursive https://github.com/wolfssl/oss-fuzz-targets /tmp/src/--depth
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -62,6 +63,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/wolfssl
           if true
           then

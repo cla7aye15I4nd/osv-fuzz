@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 22 * * 0"
 
 env:
   PROJECT: s2opc
@@ -34,8 +36,8 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://gitlab.com/systerel/S2OPC /tmp/src/S2OPC
-          git clone --depth 1 https://gitlab.com/systerel/S2OPC-fuzzing-data /tmp/src/S2OPC-fuzzing-data
+          git clone --depth 1 --recursive https://gitlab.com/systerel/S2OPC /tmp/src/S2OPC
+          git clone --depth 1 --recursive https://gitlab.com/systerel/S2OPC-fuzzing-data /tmp/src/S2OPC-fuzzing-data
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -51,6 +53,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/S2OPC
           if [ -f /usr/local/bin/clang-22 ]; then
             export CFLAGS="${CFLAGS} -Wno-error=unterminated-string-initialization"

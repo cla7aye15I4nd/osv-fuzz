@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 11 * * 0"
 
 env:
   PROJECT: qpdf
@@ -38,9 +40,9 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/qpdf/qpdf.git /tmp/src/qpdf
-          git clone --depth 1 https://github.com/madler/zlib.git /tmp/src/zlib
-          git clone --depth 1 https://github.com/libjpeg-turbo/libjpeg-turbo /tmp/src/libjpeg-turbo
+          git clone --depth 1 --recursive https://github.com/qpdf/qpdf.git /tmp/src/qpdf
+          git clone --depth 1 --recursive https://github.com/madler/zlib.git /tmp/src/zlib
+          git clone --depth 1 --recursive https://github.com/libjpeg-turbo/libjpeg-turbo /tmp/src/libjpeg-turbo
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -56,6 +58,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/qpdf
           pushd /tmp/src/zlib
           ./configure --static --prefix="/tmp/work"

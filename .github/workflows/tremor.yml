@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 22 * * 0"
 
 env:
   PROJECT: tremor
@@ -39,8 +41,15 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://gitlab.xiph.org/xiph/ogg.git /tmp/src/ogg
-          git clone --depth 1 https://gitlab.xiph.org/xiph/tremor.git /tmp/src/tremor
+          git clone --depth 1 --recursive https://gitlab.xiph.org/xiph/ogg.git /tmp/src/ogg
+          git clone --depth 1 --recursive https://gitlab.xiph.org/xiph/tremor.git /tmp/src/tremor
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/decode_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tremor/decode_fuzzer.cc"
+          curl -sL -o /tmp/src/vorbis_synthesis_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tremor/vorbis_synthesis_fuzzer.cc"
+          curl -sL -o /tmp/src/ogg_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tremor/ogg_fuzzer.cc"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -56,6 +65,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/tremor
           pushd /tmp/src/ogg
           ./autogen.sh

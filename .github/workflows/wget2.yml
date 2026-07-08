@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 14 * * 0"
 
 env:
   PROJECT: wget2
@@ -44,17 +46,16 @@ jobs:
             libz-dev \
             lzip \
             pkg-config \
-            python \
             rsync \
             texinfo
 
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://git.savannah.gnu.org/git/gnulib.git /tmp/src/gnulib
-          git clone --depth 1 https://github.com/rockdaboot/libpsl.git /tmp/src/libpsl
-          git clone --depth 1 https://gitlab.com/gnutls/gnutls.git /tmp/src/gnutls
-          git clone --depth 1 https://gitlab.com/gnuwget/wget2.git /tmp/src/wget2
+          git clone --depth 1 --recursive https://git.savannah.gnu.org/git/gnulib.git /tmp/src/gnulib
+          git clone --depth 1 --recursive https://github.com/rockdaboot/libpsl.git /tmp/src/libpsl
+          git clone --depth 1 --recursive https://gitlab.com/gnutls/gnutls.git /tmp/src/gnutls
+          git clone --depth 1 --recursive https://gitlab.com/gnuwget/wget2.git /tmp/src/wget2
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -70,6 +71,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/wget2
           export WGET2_DEPS_PATH=/tmp/src/wget2_deps
           export PKG_CONFIG_PATH=$WGET2_DEPS_PATH/lib64/pkgconfig:$WGET2_DEPS_PATH/lib/pkgconfig

@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 2 * * 0"
 
 env:
   PROJECT: dlplibs
@@ -42,22 +44,34 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 git://git.code.sf.net/p/libwpd/librevenge /tmp/src/librevenge
-          git clone --depth 1 git://gerrit.libreoffice.org/libmspub /tmp/src/libmspub
-          git clone --depth 1 git://gerrit.libreoffice.org/libcdr /tmp/src/libcdr
-          git clone --depth 1 git://gerrit.libreoffice.org/libvisio /tmp/src/libvisio
-          git clone --depth 1 git://gerrit.libreoffice.org/libzmf /tmp/src/libzmf
-          git clone --depth 1 git://gerrit.libreoffice.org/libpagemaker /tmp/src/libpagemaker
-          git clone --depth 1 git://gerrit.libreoffice.org/libfreehand /tmp/src/libfreehand
-          git clone --depth 1 git://git.code.sf.net/p/libwpd/code /tmp/src/libwpd
-          git clone --depth 1 git://git.code.sf.net/p/libwpg/code /tmp/src/libwpg
-          git clone --depth 1 https://github.com/fosnola/libstaroffice /tmp/src/&&
-          git clone --depth 1 git://git.code.sf.net/p/libwps/code /tmp/src/libwps
-          git clone --depth 1 git://git.code.sf.net/p/libmwaw/libmwaw /tmp/src/libmwaw
-          git clone --depth 1 git://git.code.sf.net/p/libebook/code /tmp/src/libe-book
-          git clone --depth 1 git://gerrit.libreoffice.org/libabw /tmp/src/libabw
-          git clone --depth 1 git://gerrit.libreoffice.org/libetonyek /tmp/src/libetonyek
-          git clone --depth 1 git://gerrit.libreoffice.org/libqxp /tmp/src/libqxp
+          git clone --depth 1 --recursive git://git.code.sf.net/p/libwpd/librevenge /tmp/src/librevenge
+          git clone --depth 1 --recursive git://gerrit.libreoffice.org/libmspub /tmp/src/libmspub
+          git clone --depth 1 --recursive git://gerrit.libreoffice.org/libcdr /tmp/src/libcdr
+          git clone --depth 1 --recursive git://gerrit.libreoffice.org/libvisio /tmp/src/libvisio
+          git clone --depth 1 --recursive git://gerrit.libreoffice.org/libzmf /tmp/src/libzmf
+          git clone --depth 1 --recursive git://gerrit.libreoffice.org/libpagemaker /tmp/src/libpagemaker
+          git clone --depth 1 --recursive git://gerrit.libreoffice.org/libfreehand /tmp/src/libfreehand
+          git clone --depth 1 --recursive git://git.code.sf.net/p/libwpd/code /tmp/src/libwpd
+          git clone --depth 1 --recursive git://git.code.sf.net/p/libwpg/code /tmp/src/libwpg
+          git clone --depth 1 --recursive https://github.com/fosnola/libstaroffice /tmp/src/&&
+          git clone --depth 1 --recursive git://git.code.sf.net/p/libwps/code /tmp/src/libwps
+          git clone --depth 1 --recursive git://git.code.sf.net/p/libmwaw/libmwaw /tmp/src/libmwaw
+          git clone --depth 1 --recursive git://git.code.sf.net/p/libebook/code /tmp/src/libe-book
+          git clone --depth 1 --recursive git://gerrit.libreoffice.org/libabw /tmp/src/libabw
+          git clone --depth 1 --recursive git://gerrit.libreoffice.org/libetonyek /tmp/src/libetonyek
+          git clone --depth 1 --recursive git://gerrit.libreoffice.org/libqxp /tmp/src/libqxp
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          # Pattern: *.options — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/dlplibs" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.options', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          # Pattern: *.patch — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/dlplibs" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.patch', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -73,6 +87,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src
           export CXXFLAGS="$CXXFLAGS -Wno-register"
           tar -xJf /tmp/src/zlib-1.3.2.tar.xz

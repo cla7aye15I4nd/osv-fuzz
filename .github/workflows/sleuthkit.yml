@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 5 * * 0"
 
 env:
   PROJECT: sleuthkit
@@ -37,7 +39,12 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/sleuthkit/sleuthkit /tmp/src/sleuthkit
+          git clone --depth 1 --recursive https://github.com/sleuthkit/sleuthkit /tmp/src/sleuthkit
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/replay_build.sh "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/sleuthkit/replay_build.sh"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -53,6 +60,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/sleuthkit
           export CFLAGS="$CFLAGS -Wno-error=non-c-typedef-for-linkage"
           export CXXFLAGS="$CXXFLAGS -Wno-error=non-c-typedef-for-linkage"

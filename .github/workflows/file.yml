@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 12 * * 0"
 
 env:
   PROJECT: file
@@ -32,9 +34,17 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/file/file.git /tmp/src/file
-          git clone --depth 1 https://github.com/DavidKorczynski/binary-samples.git /tmp/src/binary-samples
-          git clone --depth 1 https://github.com/corkami/pocs /tmp/src/pocs
+          git clone --depth 1 --recursive https://github.com/file/file.git /tmp/src/file
+          git clone --depth 1 --recursive https://github.com/DavidKorczynski/binary-samples.git /tmp/src/binary-samples
+          git clone --depth 1 --recursive https://github.com/corkami/pocs /tmp/src/pocs
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/fuzzer_temp_file.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/fuzzer_temp_file.h"
+          curl -sL -o /tmp/src/magic_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/magic_fuzzer.cc"
+          curl -sL -o /tmp/src/magic_fuzzer_loaddb.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/magic_fuzzer_loaddb.cc"
+          curl -sL -o /tmp/src/magic_fuzzer_fd.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/magic_fuzzer_fd.cc"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -50,6 +60,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/file
           autoreconf -i
           ./configure --enable-static --enable-fsect-man5

@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 16 * * 0"
 
 env:
   PROJECT: hermes
@@ -40,10 +42,15 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/facebook/hermes.git /tmp/src/&&
-          git clone --depth 1 https://github.com/tc39/test262 /tmp/src/&&
-          git clone --depth 1 https://github.com/Zon8Research/v8-vulnerabilities /tmp/src/&&
-          git clone --depth 1 https://github.com/v8/v8 /tmp/src/v8
+          git clone --depth 1 --recursive https://github.com/facebook/hermes.git /tmp/src/&&
+          git clone --depth 1 --recursive https://github.com/tc39/test262 /tmp/src/&&
+          git clone --depth 1 --recursive https://github.com/Zon8Research/v8-vulnerabilities /tmp/src/&&
+          git clone --depth 1 --recursive https://github.com/v8/v8 /tmp/src/v8
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/preprocess-corpus.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/hermes/preprocess-corpus.py"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -59,6 +66,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src
           mv /tmp/src/hermes_seed_corpus.zip $GITHUB_WORKSPACE/build/fuzz-targets
           mv /tmp/src/hermes.dict $GITHUB_WORKSPACE/build/fuzz-targets

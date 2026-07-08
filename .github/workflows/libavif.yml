@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 15 * * 0"
 
 env:
   PROJECT: libavif
@@ -37,7 +39,12 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/AOMediaCodec/libavif.git /tmp/src/libavif
+          git clone --depth 1 --recursive https://github.com/AOMediaCodec/libavif.git /tmp/src/libavif
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/avif_decode_seed_corpus.zip "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libavif/avif_decode_seed_corpus.zip"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -53,6 +60,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/libavif
           bash tests/oss-fuzz/build.sh
           find $GITHUB_WORKSPACE/build/fuzz-targets/

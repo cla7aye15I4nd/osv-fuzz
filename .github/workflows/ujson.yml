@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 23 * * 0"
 
 env:
   PROJECT: ujson
@@ -29,6 +31,13 @@ jobs:
         run: |
           bash scripts/setup_aflpp.sh
 
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/json_differential_fuzzer.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ujson/json_differential_fuzzer.py"
+          curl -sL -o /tmp/src/ujson_fuzzer.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ujson/ujson_fuzzer.py"
+          curl -sL -o /tmp/src/hypothesis_structured_fuzzer.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ujson/hypothesis_structured_fuzzer.py"
+
       - name: Build fuzz targets with AFL++
         run: |
           mkdir -p build/fuzz-targets /tmp/work
@@ -43,6 +52,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/ultrajson
           pip3 install .
           for fuzzer in $(find /tmp/src -name '*_fuzzer.py'); do

@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 7 * * 0"
 
 env:
   PROJECT: vulkan-loader
@@ -40,8 +42,29 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/khronosgroup/Vulkan-Headers /tmp/src/vulkan-headers
-          git clone --depth 1 https://github.com/khronosgroup/Vulkan-Loader /tmp/src/vulkan-loader
+          git clone --depth 1 --recursive https://github.com/khronosgroup/Vulkan-Headers /tmp/src/vulkan-headers
+          git clone --depth 1 --recursive https://github.com/khronosgroup/Vulkan-Loader /tmp/src/vulkan-loader
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          # Pattern: fuzzers/*.h — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/vulkan-loader" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'fuzzers/.*\\.h', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          # Pattern: fuzzers/*_fuzzer.c — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/vulkan-loader" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'fuzzers/.*_fuzzer\\.c', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          # Pattern: *.sh — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/vulkan-loader" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.sh', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          curl -sL -o /tmp/src/vulkan-keywords.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/vulkan-loader/vulkan-keywords.dict"
+          # Pattern: *.diff — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/vulkan-loader" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.diff', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -57,6 +80,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/vulkan-loader
           git apply --ignore-space-change --ignore-whitespace /tmp/src/fuzz-patch.diff
           mkdir -p build

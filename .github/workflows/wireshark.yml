@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 15 * * 0"
 
 env:
   PROJECT: wireshark
@@ -39,8 +41,8 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://gitlab.com/wireshark/wireshark.git /tmp/src/wireshark
-          git clone --depth 1 https://bitbucket.org/jwzawadzki/wireshark-fuzzdb.git /tmp/src/wireshark-fuzzdb
+          git clone --depth 1 --recursive https://gitlab.com/wireshark/wireshark.git /tmp/src/wireshark
+          git clone --depth 1 --recursive https://bitbucket.org/jwzawadzki/wireshark-fuzzdb.git /tmp/src/wireshark-fuzzdb
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -56,6 +58,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/wireshark
           cd /tmp/src
           tar -xJf /tmp/src/libxml2-2.12.10.tar.xz

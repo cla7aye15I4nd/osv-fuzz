@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 10 * * 0"
 
 env:
   PROJECT: libyaml
@@ -36,7 +38,21 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/yaml/libyaml /tmp/src/libyaml
+          git clone --depth 1 --recursive https://github.com/yaml/libyaml /tmp/src/libyaml
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          # Pattern: *.h — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/libyaml" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.h', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          # Pattern: *_fuzzer.c — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/libyaml" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*_fuzzer\\.c', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          curl -sL -o /tmp/src/libyaml_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/libyaml_fuzzer.options"
+          curl -sL -o /tmp/src/yaml.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/yaml.dict"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -52,6 +68,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/libyaml
           ./bootstrap
           ./configure

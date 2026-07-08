@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 12 * * 0"
 
 env:
   PROJECT: boringssl
@@ -41,9 +43,17 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://boringssl.googlesource.com/boringssl /tmp/src/boringssl
-          git clone --depth 1 https://github.com/google/fuzzing.git /tmp/src/fuzzing
-          git clone --depth 1 https://github.com/google/libprotobuf-mutator.git /tmp/src/libprotobuf-mutator
+          git clone --depth 1 --recursive https://boringssl.googlesource.com/boringssl /tmp/src/boringssl
+          git clone --depth 1 --recursive https://github.com/google/fuzzing.git /tmp/src/fuzzing
+          git clone --depth 1 --recursive https://github.com/google/libprotobuf-mutator.git /tmp/src/libprotobuf-mutator
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          # Pattern: *.cc — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/boringssl" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.cc', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -59,6 +69,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src
           mkdir -p /tmp/work/boringssl
           cd /tmp/work/boringssl

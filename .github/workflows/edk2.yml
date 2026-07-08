@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 7 * * 0"
 
 env:
   PROJECT: edk2
@@ -36,7 +38,7 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 https://github.com/tianocore/edk2.git /tmp/src/--recursive
-          git clone --depth 1 https://github.com/intel/hbfa-fl /tmp/src/hbfa-fl
+          git clone --depth 1 --recursive https://github.com/intel/hbfa-fl /tmp/src/hbfa-fl
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -52,6 +54,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src
           sed -i 's/GCC5_/GCC_/g; s/GCC48_/GCC_/g; s/GCC49_/GCC_/g' \
               /tmp/src/hbfa-fl/HBFA/UefiHostFuzzTestPkg/Conf/tools_def.customized

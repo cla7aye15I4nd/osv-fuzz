@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 12 * * 0"
 
 env:
   PROJECT: swift-nio
@@ -32,8 +34,16 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/google/fuzzing /tmp/src/fuzzing
-          git clone --depth 1 https://github.com/apple/swift-nio.git /tmp/src/swift-nio
+          git clone --depth 1 --recursive https://github.com/google/fuzzing /tmp/src/fuzzing
+          git clone --depth 1 --recursive https://github.com/apple/swift-nio.git /tmp/src/swift-nio
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          # Pattern: *.swift — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/swift-nio" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.swift', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -49,6 +59,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/swift-nio
           mkdir swift-nio-fuzz
           cd swift-nio-fuzz

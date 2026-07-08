@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 8 * * 0"
 
 env:
   PROJECT: grok
@@ -32,8 +34,8 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/GrokImageCompression/grok.git /tmp/src/grok
-          git clone --depth 1 https://github.com/GrokImageCompression/grok-test-data.git /tmp/src/grok-data
+          git clone --depth 1 --recursive https://github.com/GrokImageCompression/grok.git /tmp/src/grok
+          git clone --depth 1 --recursive https://github.com/GrokImageCompression/grok-test-data.git /tmp/src/grok-data
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -49,6 +51,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/grok
           export GRK_DATA_ROOT=/tmp/src/grok-data
           mkdir build

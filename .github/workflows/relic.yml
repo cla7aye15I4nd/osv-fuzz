@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 18 * * 0"
 
 env:
   PROJECT: relic
@@ -31,15 +33,14 @@ jobs:
           sudo apt-get install -y -qq \
             autoconf \
             automake \
-            libtool \
-            python
+            libtool
 
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/relic-toolkit/relic.git /tmp/src/relic
-          git clone --depth 1 https://github.com/randombit/botan.git /tmp/src/botan
-          git clone --depth 1 https://github.com/MozillaSecurity/cryptofuzz /tmp/src/cryptofuzz
+          git clone --depth 1 --recursive https://github.com/relic-toolkit/relic.git /tmp/src/relic
+          git clone --depth 1 --recursive https://github.com/randombit/botan.git /tmp/src/botan
+          git clone --depth 1 --recursive https://github.com/MozillaSecurity/cryptofuzz /tmp/src/cryptofuzz
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -55,6 +56,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src
           export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_NO_OPENSSL -Wno-deprecated-literal-operator"
           export LIBFUZZER_LINK="$LIB_FUZZING_ENGINE"

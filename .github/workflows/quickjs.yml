@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
 
 env:
   PROJECT: quickjs
@@ -32,8 +34,8 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/bellard/quickjs /tmp/src/quickjs
-          git clone --depth 1 https://github.com/renatahodovan/quickjs-corpus /tmp/src/quickjs-corpus
+          git clone --depth 1 --recursive https://github.com/bellard/quickjs /tmp/src/quickjs
+          git clone --depth 1 --recursive https://github.com/renatahodovan/quickjs-corpus /tmp/src/quickjs-corpus
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -49,6 +51,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/quickjs
           sed -i -e 's/CFLAGS=/CFLAGS+=/' Makefile
           sed -i -e 's/#define USE_WORKER/\/\/#define USE_WORKER/' quickjs-libc.c

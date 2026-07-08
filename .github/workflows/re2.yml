@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 16 * * 0"
 
 env:
   PROJECT: re2
@@ -35,8 +37,8 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/abseil/abseil-cpp /tmp/src/abseil-cpp
-          git clone --depth 1 https://github.com/google/re2 /tmp/src/re2
+          git clone --depth 1 --recursive https://github.com/abseil/abseil-cpp /tmp/src/abseil-cpp
+          git clone --depth 1 --recursive https://github.com/google/re2 /tmp/src/re2
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -52,6 +54,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src
           CXXFLAGS="$CXXFLAGS -O2"
           cd /tmp/src/abseil-cpp

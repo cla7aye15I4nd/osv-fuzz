@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 1 * * 0"
 
 env:
   PROJECT: dav1d
@@ -36,8 +38,13 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://code.videolan.org/videolan/dav1d.git /tmp/src/dav1d
-          git clone --depth 1 https://code.videolan.org/videolan/dav1d-test-data.git /tmp/src/tests/dav1d-test-data
+          git clone --depth 1 --recursive https://code.videolan.org/videolan/dav1d.git /tmp/src/dav1d
+          git clone --depth 1 --recursive https://code.videolan.org/videolan/dav1d-test-data.git /tmp/src/tests/dav1d-test-data
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/linux32.meson "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dav1d/linux32.meson"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -53,6 +60,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/dav1d
           build=/tmp/work/build
           rm -rf ${build}

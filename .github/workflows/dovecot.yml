@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 4 * * 0"
 
 env:
   PROJECT: dovecot
@@ -46,8 +48,8 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/dovecot/core /tmp/src/dovecot
-          git clone --depth 1 https://github.com/dovecot/pigeonhole /tmp/src/pigeonhole
+          git clone --depth 1 --recursive https://github.com/dovecot/core /tmp/src/dovecot
+          git clone --depth 1 --recursive https://github.com/dovecot/pigeonhole /tmp/src/pigeonhole
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -63,6 +65,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src
           cd dovecot
           find . -name "Makefile.am" -exec sed -i -e 's,(FUZZER_LDFLAGS),(FUZZER_LDFLAGS) -static-libtool-libs,' {} \;

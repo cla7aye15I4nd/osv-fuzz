@@ -6,6 +6,8 @@ on:
       fuzz_duration:
         description: "Fuzzing duration in seconds"
         default: "1800"
+  schedule:
+    - cron: "0 1 * * 0"
 
 env:
   PROJECT: ghostscript
@@ -38,9 +40,28 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/apple/cups.git /tmp/src/cups
-          git clone --depth 1 https://git.savannah.gnu.org/git/freetype/freetype2.git /tmp/src/freetype
-          git clone --depth 1 git://git.ghostscript.com/ghostpdl.git /tmp/src/ghostpdl
+          git clone --depth 1 --recursive https://github.com/apple/cups.git /tmp/src/cups
+          git clone --depth 1 --recursive https://git.savannah.gnu.org/git/freetype/freetype2.git /tmp/src/freetype
+          git clone --depth 1 --recursive git://git.ghostscript.com/ghostpdl.git /tmp/src/ghostpdl
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/pdf_seeds "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/pdf_seeds"
+          curl -sL -o /tmp/src/dicts "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/dicts"
+          # Pattern: *.cc — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/ghostscript" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.cc', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          # Pattern: *.options — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/ghostscript" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.options', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          # Pattern: *.h — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/ghostscript" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.h', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          curl -sL -o /tmp/src/generate_seeds.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/generate_seeds.py"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -56,6 +77,9 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Make /usr/local writable for install commands
+          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
+          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
           cd /tmp/src/ghostpdl
           pushd /tmp/src/cups
           sed -i '2110s/\(\s\)f->value/\1(int)f->value/' cups/ppd-cache.c
