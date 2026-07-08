@@ -69,7 +69,7 @@ jobs:
           cd /tmp/src/libical
           set +e
           cmake . -DLIBICAL_STATIC=ON -DLIBICAL_GLIB=False -DLIBICAL_GLIB_BUILD_DOCS=False -DLIBICAL_GOBJECT_INTROSPECTION=False -DLIBICAL_JAVA_BINDINGS=False -DLIBICAL_BUILD_TESTING=True
-          make install -j$(nproc)
+          sudo make install -j$(nproc)
           $CXX $CXXFLAGS -std=c++11 /tmp/src/libical_fuzzer.cc $LIB_FUZZING_ENGINE /usr/local/lib/libical.a -o $GITHUB_WORKSPACE/build/fuzz-targets/libical_fuzzer
           $CXX $CXXFLAGS -std=c++11 /tmp/src/libical_extended_fuzzer.cc $LIB_FUZZING_ENGINE /usr/local/lib/libical.a -o $GITHUB_WORKSPACE/build/fuzz-targets/libical_extended_fuzzer
           $CXX $CXXFLAGS -std=c++11 /tmp/src/libicalvcard_fuzzer.cc $LIB_FUZZING_ENGINE /usr/local/lib/libicalvcard.a /usr/local/lib/libical.a -o $GITHUB_WORKSPACE/build/fuzz-targets/libicalvcard_fuzzer

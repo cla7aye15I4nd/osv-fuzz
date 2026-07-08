@@ -71,7 +71,7 @@ jobs:
           cd libxml2-2.12.10
           ./configure --disable-shared --enable-static --disable-ipv6 --without-python --without-zlib --without-lzma
           make -j$(nproc)
-          make install
+          sudo make install
           export LIBXML_CFLAGS="-I$(pwd)/include"
           export LIBXML_LIBS="-L$(pwd) -lxml2"
           export XML_CFLAGS="$LIBXML_CFLAGS"

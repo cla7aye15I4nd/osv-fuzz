@@ -88,20 +88,20 @@ jobs:
           cd /tmp/src/libunistring
           ./configure --enable-static --disable-shared --prefix=$WGET2_DEPS_PATH
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/libidn2
           ./configure --enable-static --disable-shared --disable-doc --disable-gcc-warnings --prefix=$WGET2_DEPS_PATH
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/libpsl
           ./autogen.sh
           ./configure --enable-static --disable-shared --disable-gtk-doc --enable-runtime=libidn2 --enable-builtin=libidn2 --prefix=$WGET2_DEPS_PATH
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/gmp
           ./configure --enable-static --disable-shared --prefix=$WGET2_DEPS_PATH
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/nettle
           ./configure --enable-static --disable-shared --disable-documentation --disable-openssl --disable-assembler --disable-fat --prefix=$WGET2_DEPS_PATH
           ( make -j$(nproc) || make -j$(nproc) ) && make install
@@ -120,11 +120,11 @@ jobs:
               --disable-maintainer-mode --disable-libdane --disable-gcc-warnings --disable-full-test-suite --disable-guile \
               --prefix=$WGET2_DEPS_PATH
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/libmicrohttpd-*
           ./configure --enable-static --disable-shared --disable-doc --disable-examples --disable-tools --prefix=$WGET2_DEPS_PATH
           make -j$(nproc)
-          make install
+          sudo make install
           export ASAN_OPTIONS=detect_leaks=0
           cd /tmp/src/wget2
           grep -q '^MAINTAINERCLEANFILES =' lib/Makefile.am || \

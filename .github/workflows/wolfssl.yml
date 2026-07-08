@@ -321,7 +321,7 @@ jobs:
               ./autogen.sh
               ./configure --enable-static --disable-shared --prefix=/usr CC="clang"
               make -j "$(nproc)" all
-              make install
+              sudo make install
               export LDFLAGS="${LDFLAGS-""}"
               export LDLIBS="${LDLIBS-""} -lwolfssl $LIB_FUZZING_ENGINE"
               cd "${target_dir}"

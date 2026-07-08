@@ -89,7 +89,7 @@ jobs:
           LSB_BUILD=y ./configure --prefix="/tmp/work" --libdir="$GITHUB_WORKSPACE/build/fuzz-targets" --disable-gnutls \
              --disable-libusb --with-components=core
           make clean
-          make install-headers install-libs
+          sudo make install-headers install-libs
           make -C filter libs install-libs
           install -m755 cups-config "/tmp/work"/cups-config
           popd

@@ -69,7 +69,7 @@ jobs:
           ./configure --enable-macho --enable-debug --enable-dex --enable-dotnet --without-crypto
           make clean
           make -j$(nproc) all
-          make install
+          sudo make install
           fuzzers=$(find /tmp/src/yara/tests/oss-fuzz/ -name "*.cc")
           for f in $fuzzers; do
             fuzzer_name=$(basename -s ".cc" $f)

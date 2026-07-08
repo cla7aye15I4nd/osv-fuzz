@@ -89,20 +89,20 @@ jobs:
           cd /tmp/src/libunistring
           ./configure --enable-static --disable-shared --prefix=$WGET_DEPS_PATH
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/libidn2
           ./configure --enable-static --disable-shared --disable-doc --disable-gcc-warnings --prefix=$WGET_DEPS_PATH
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/libpsl
           ./autogen.sh
           ./configure --enable-static --disable-shared --disable-gtk-doc --enable-runtime=libidn2 --enable-builtin=libidn2 --prefix=$WGET_DEPS_PATH
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/gmp
           ./configure --enable-static --disable-shared --prefix=$WGET_DEPS_PATH
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/nettle
           bash .bootstrap
           ./configure --enable-static --disable-shared --disable-documentation --disable-openssl --disable-assembler --disable-fat --prefix=$WGET_DEPS_PATH
@@ -122,7 +122,7 @@ jobs:
               --disable-maintainer-mode --disable-libdane --disable-gcc-warnings --disable-full-test-suite --disable-guile \
               --prefix=$WGET_DEPS_PATH
           make -j$(nproc)
-          make install
+          sudo make install
           export ASAN_OPTIONS=detect_leaks=0
           ln -sf $WGET_DEPS_PATH/lib64/libhogweed.a $WGET_DEPS_PATH/lib/libhogweed.a
           ln -sf $WGET_DEPS_PATH/lib64/libnettle.a  $WGET_DEPS_PATH/lib/libnettle.a

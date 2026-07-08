@@ -78,13 +78,13 @@ jobs:
           ./configure --prefix="/tmp/work" --enable-static --disable-shared --disable-crc
           make clean
           make -j$(nproc)
-          make install
+          sudo make install
           popd
           pushd /tmp/src/tremor
           ./autogen.sh --prefix="/tmp/work" --enable-static --disable-shared
           ./configure --prefix="/tmp/work" --enable-static --disable-shared
           make -j$(nproc)
-          make install
+          sudo make install
           popd
           $CXX $CXXFLAGS -I"/tmp/work/include" -L"/tmp/work/lib" \
               /tmp/src/decode_fuzzer.cc -o $GITHUB_WORKSPACE/build/fuzz-targets/decode_fuzzer \

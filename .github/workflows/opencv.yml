@@ -83,7 +83,7 @@ jobs:
             -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_opencv_apps=OFF \
             -DWITH_IMGCODEC_GIF=ON -DWITH_IPP=OFF /tmp/src/opencv
           make -j$(nproc)
-          make install
+          sudo make install
           popd
           pushd /tmp/src
           for fuzzer in core_fuzzer filestorage_read_file_fuzzer \

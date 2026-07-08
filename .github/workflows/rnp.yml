@@ -78,7 +78,7 @@ jobs:
                          --disable-modules=locking_allocator \
                          --enable-modules="$BOTAN_MODULES"
           make "-j$(nproc)"
-          make install
+          sudo make install
           cd "/tmp/src"
           mkdir fuzzing_corpus
           cd "/tmp/src/rnp/src/tests/data"

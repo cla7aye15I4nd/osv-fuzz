@@ -76,8 +76,8 @@ jobs:
           CXXFLAGS="${CXXFLAGS} -fno-sanitize=integer-divide-by-zero,float-divide-by-zero"
           cmake . -DBUILD_SHARED_LIBS=OFF  -DENABLE_OPENMP=OFF
           make -j$(nproc)
-          make install
-          ldconfig
+          sudo make install
+          sudo ldconfig
           MU_CXXFLAGS=$(pkg-config muparser --cflags)
           MU_LIBS=$(pkg-config muparser --libs)
           $CXX -std=c++11 $CXXFLAGS -I. \

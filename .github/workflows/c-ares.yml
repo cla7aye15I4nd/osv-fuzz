@@ -69,7 +69,7 @@ jobs:
           cd build
           cmake ..
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/c-ares
           ./buildconf
           ./configure --enable-debug --enable-tests

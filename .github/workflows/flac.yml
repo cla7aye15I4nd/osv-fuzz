@@ -90,7 +90,7 @@ jobs:
           ./autogen.sh
           ./configure --disable-crc --disable-shared --prefix="/tmp/src/libogg-install"
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/flac/
           ./autogen.sh
           if [[ $CFLAGS = *sanitize=memory* ]]

@@ -85,25 +85,25 @@ jobs:
           cd /tmp/src/libpcap-1.9.1
           ./configure --disable-shared
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/zeromq-4.3.5
           ./autogen.sh
           (
           export CXXFLAGS="-Wno-error=missing-braces -Wno-error=unused-command-line-argument -stdlib=libc++"
           ./configure --without-documentation --without-libsodium --enable-static --disable-shared
           make -j$(nproc)
-          make install
+          sudo make install
           )
           cd /tmp/src/json-c-json-c-0.17-20230812
           mkdir build
           cd build
           cmake -DBUILD_SHARED_LIBS=OFF ..
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/libmaxminddb-1.7.1
           ./configure --disable-shared --enable-static
           make -j$(nproc)
-          make install
+          sudo make install
           cd $NDPI_HOME
           ./autogen.sh
           ./configure

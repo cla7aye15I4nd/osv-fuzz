@@ -75,7 +75,7 @@ jobs:
             cd build
             cmake -DBUILD_SHARED_LIBS=OFF ..
             make -j$(nproc)
-            make install
+            sudo make install
           popd
           bash -x ./ndpi/tests/ossfuzz.sh
           pushd /tmp/src/ndpi/tests/unit

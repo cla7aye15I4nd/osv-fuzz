@@ -97,7 +97,7 @@ jobs:
           cmake -DBUILD_SHARED_LIBS=OFF -DENABLE_LYD_PRIV=ON -DCMAKE_INSTALL_PREFIX:PATH=/usr \
               -D CMAKE_BUILD_TYPE:String="Release" ..
           make -j$(nproc)
-          make install
+          sudo make install
           )
           export ASAN_OPTIONS=detect_leaks=0
           export CFLAGS="${CFLAGS} -DFUZZING_OVERRIDE_LLVMFuzzerTestOneInput"
@@ -105,7 +105,7 @@ jobs:
           ./bootstrap.sh
           ./configure --enable-libfuzzer --enable-static --enable-static-bin --sbindir=/tmp/src/bin
           make -j$(nproc)
-          make install
+          sudo make install
           cp ./lib/.libs/libfrr.so.0 $GITHUB_WORKSPACE/build/fuzz-targets/lib/
           cp /tmp/src/bin/bgpd $GITHUB_WORKSPACE/build/fuzz-targets/
           cp /tmp/src/bin/ospfd $GITHUB_WORKSPACE/build/fuzz-targets/

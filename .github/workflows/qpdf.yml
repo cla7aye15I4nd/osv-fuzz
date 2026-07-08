@@ -69,12 +69,12 @@ jobs:
           pushd /tmp/src/zlib
           ./configure --static --prefix="/tmp/work"
           make -j$(nproc) all
-          make install
+          sudo make install
           popd
           pushd /tmp/src/libjpeg-turbo
           cmake . -DCMAKE_INSTALL_PREFIX="/tmp/work" -DENABLE_STATIC=1 -DENABLE_SHARED=0 -DCMAKE_POSITION_INDEPENDENT_CODE=1
           make -j$(nproc)
-          make install
+          sudo make install
           popd
           ./fuzz/oss-fuzz-build
           set -e

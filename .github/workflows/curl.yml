@@ -56,7 +56,7 @@ jobs:
             --with-libssh2 \
             --prefix=/tmp/curl-install
           make -j$(nproc)
-          make install
+          sudo make install
 
       - name: Build fuzz targets with AFL++
         run: |

@@ -74,7 +74,7 @@ jobs:
           autoreconf -fiv
           ./configure --disable-docs --enable-shared=no --prefix="/tmp/work"
           make -j$(nproc)
-          make install
+          sudo make install
           pushd /tmp/src
           mkdir -p exif_corpus
           find exif-samples -type f -name '*.jpg' -exec mv -n {} exif_corpus/ \; -o -name '*.tiff' -exec mv -n {} exif_corpus/ \;

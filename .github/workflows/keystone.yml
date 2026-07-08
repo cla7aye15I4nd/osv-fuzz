@@ -75,8 +75,8 @@ jobs:
           cd build
           cmake ..
           make -j$(nproc)
-          make install -j$(nproc)
-          ldconfig
+          sudo make install -j$(nproc)
+          sudo ldconfig
           cd ../suite/fuzz
           ls fuzz_*.c | cut -d_ -f2-4 | cut -d. -f1 | while read target
           do

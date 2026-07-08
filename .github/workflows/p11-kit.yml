@@ -39,6 +39,7 @@ jobs:
             libtasn1-6-dev \
             libtasn1-bin \
             libtool \
+            meson \
             ninja-build \
             pkg-config
 

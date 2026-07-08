@@ -81,7 +81,7 @@ jobs:
                 -DUSE_SSH=OFF \
                 -DUSE_BUNDLED_ZLIB=ON
           make -j$(nproc)
-          make install
+          sudo make install
           $CC $CFLAGS -c \
               -I./src -I./src/util -I./include/ -I./gen_headers \
               -I../src/libgit2 -I../src/util -I../include \

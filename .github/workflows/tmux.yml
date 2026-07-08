@@ -77,7 +77,7 @@ jobs:
             -DEVENT__DISABLE_TESTS=ON -DEVENT__DISABLE_SAMPLES=ON \
             -DEVENT__LIBRARY_TYPE=STATIC
           make -j"$(nproc)"
-          make install
+          sudo make install
           sudo ldconfig
           popd
           export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig"

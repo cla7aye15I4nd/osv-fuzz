@@ -97,7 +97,7 @@ jobs:
           sed -i 's/case TARGET\(.*\): {/\0\nfuzzer_record_code_coverage(f->f_code, f->f_lasti);/g' Python/ceval.c
           ./configure "${FLAGS[@]:-}" --prefix=$CPYTHON_INSTALL_PATH
           make -j$(nproc)
-          make install
+          sudo make install
           cp -R $CPYTHON_INSTALL_PATH $GITHUB_WORKSPACE/build/fuzz-targets/
           $GITHUB_WORKSPACE/build/fuzz-targets/cpython-install/bin/python3 -m pip install hypothesis
           cd /tmp/src/library-fuzzers

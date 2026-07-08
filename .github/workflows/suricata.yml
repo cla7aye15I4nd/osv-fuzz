@@ -103,25 +103,25 @@ jobs:
           cd jansson-2.14
           ./configure --disable-shared
           make -j$(nproc)
-          make install
+          sudo make install
           cd ..
           tar -xvzf libpcap-1.9.1.tar.gz
           cd libpcap-1.9.1
           ./configure --disable-shared
           make -j$(nproc)
-          make install
+          sudo make install
           cd ..
           cd fuzzpcap
           mkdir build
           cd build
           cmake ..
-          make install
+          sudo make install
           cd ../..
           cd libyaml
           ./bootstrap
           ./configure --disable-shared
           make -j$(nproc)
-          make install
+          sudo make install
           cd ..
           export CARGO_BUILD_TARGET="x86_64-unknown-linux-gnu"
           export MSAN_OPTIONS=strict_memcmp=false

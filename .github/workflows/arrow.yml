@@ -77,7 +77,7 @@ jobs:
           cd openssl-${OPENSSL_VERSION}
           ./Configure no-apps no-docs no-tests no-shared no-asm
           make -j
-          make install
+          sudo make install
           ARROW=/tmp/src/arrow/cpp
           BUILD_DIR=/tmp/src/build-dir
           mkdir -p ${BUILD_DIR}

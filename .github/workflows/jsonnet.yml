@@ -74,7 +74,7 @@ jobs:
           cd build
           cmake ..
           make -j$(nproc)
-          make install
+          sudo make install
           cd /tmp/src/
           mkdir jsonnet/build
           pushd jsonnet/build

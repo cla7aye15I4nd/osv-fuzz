@@ -98,25 +98,25 @@ jobs:
           echo '#include <locale.h>' >>i18n/digitlst.h
           ln -s /usr/include/locale.h /usr/include/xlocale.h
           make -j
-          make install
+          sudo make install
           cd /tmp/src/libunistring
           ./autogen.sh
           ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=detect_leaks=0 \
             ./configure --enable-static --disable-shared --prefix=$DEPS_PATH
           make -j
-          make install
+          sudo make install
           cd /tmp/src/libidn
           ./bootstrap
           ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=detect_leaks=0 \
             ./configure --enable-static --disable-shared --disable-doc --prefix=$DEPS_PATH
           make -j
-          make install
+          sudo make install
           cd /tmp/src/libidn2
           ./bootstrap
           ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=detect_leaks=0 \
             ./configure --enable-static --disable-shared --disable-doc --disable-gcc-warnings --prefix=$DEPS_PATH
           make -j
-          make install
+          sudo make install
           cd /tmp/src/libpsl
           ./autogen.sh
           export CXXFLAGS="$CXXFLAGS -L$DEPS_PATH/lib/"

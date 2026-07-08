@@ -34,6 +34,8 @@ jobs:
             autoconf \
             automake \
             libtool \
+            meson \
+            ninja-build \
             pkg-config
 
       - name: Clone source
@@ -82,7 +84,7 @@ jobs:
           patch -p1 < /tmp/src/0001-deflate-Zero-initialise-the-prev-and-window-buffers.patch
           mkdir build && cd build
           CFLAGS=-fPIC ../configure --static --prefix=$PREFIX
-          make install -j$(nproc)
+          sudo make install -j$(nproc)
           popd
           meson $BUILD \
             -Doss_fuzz=enabled \
