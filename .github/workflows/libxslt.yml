@@ -39,7 +39,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://gitlab.gnome.org/GNOME/libxml2.git /tmp/src/--branch=$LATEST_LIBXML2_RELEASE_TAG
+          git clone --depth 1 --recursive https://gitlab.gnome.org/GNOME/libxml2.git /tmp/src/libxml2
           git clone --depth 1 --recursive https://gitlab.gnome.org/GNOME/libxslt.git /tmp/src/libxslt
 
       - name: Build fuzz targets with AFL++

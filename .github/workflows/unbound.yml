@@ -73,6 +73,8 @@ jobs:
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/unbound
           set +e
+          # Copy fuzzer source files into unbound source tree
+          cp $SRC/parse_packet_fuzzer.c $SRC/fuzz_1.c $SRC/fuzz_2.c $SRC/fuzz_3.c $SRC/fuzz_4.c .
           CFLAGS="${CFLAGS} -DVALGRIND=1"
           ./configure
           make -j6 all unittest

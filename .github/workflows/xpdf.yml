@@ -43,6 +43,7 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://gitlab.freedesktop.org/freetype/freetype /tmp/src/freetype
+          wget -q -O /tmp/src/xpdf-latest.tar.gz https://dl.xpdfreader.com/xpdf-latest.tar.gz
 
       - name: Download fuzzer files from oss-fuzz
         run: |
@@ -99,11 +100,11 @@ jobs:
           cmake ../ -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
             -DOPI_SUPPORT=ON -DSPLASH_CMYK=ON -DMULTITHREADED=ON \
             -DUSE_EXCEPTIONS=ON -DXPDFWIDGET_PRINTING=ON -DFREETYPE_DIR="$PREFIX"
-          make
+          make -j$(nproc)
           for fuzzer in zxdoc pdfload JBIG2; do
               cp ../../fuzz_$fuzzer.cc .
               $CXX fuzz_$fuzzer.cc -o $GITHUB_WORKSPACE/build/fuzz-targets/fuzz_$fuzzer $CXXFLAGS $LIB_FUZZING_ENGINE \
-                ./xpdf/libtestXpdfStatic.a ./fofi/libfofi.a ./goo/libgoo.a ./splash/libsplash.a ./xpdf/libtestXpdfWidgetStatic.a /work/prefix/lib/libfreetype.a \
+                ./xpdf/libtestXpdfStatic.a ./fofi/libfofi.a ./goo/libgoo.a ./splash/libsplash.a ./xpdf/libtestXpdfWidgetStatic.a $PREFIX/lib/libfreetype.a \
                 -I../ -I../goo -I../fofi -I. -I../xpdf -I../splash
           done
           cp /tmp/src/fuzz_*.options $GITHUB_WORKSPACE/build/fuzz-targets/

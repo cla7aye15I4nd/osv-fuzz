@@ -1,0 +1,178 @@
+name: "Test All Projects"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration per project (seconds)"
+        default: "300"
+      batch_size:
+        description: "Max concurrent workflows"
+        default: "20"
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trigger all project workflows
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BATCH_SIZE=${{ inputs.batch_size || '20' }}
+          FUZZ_DURATION=${{ inputs.fuzz_duration || '300' }}
+
+          # Collect all project workflow files (exclude this one)
+          WORKFLOWS=()
+          for f in .github/workflows/*.yml; do
+            name=$(basename "$f")
+            [ "$name" = "test-all.yml" ] && continue
+            WORKFLOWS+=("$name")
+          done
+
+          echo "[+] Found ${#WORKFLOWS[@]} project workflows"
+          echo "[+] Batch size: $BATCH_SIZE"
+          echo "[+] Fuzz duration: $FUZZ_DURATION"
+
+          # Track triggered run IDs
+          > /tmp/run_ids.txt
+          active=0
+
+          for wf in "${WORKFLOWS[@]}"; do
+            # Wait if we've hit the batch limit
+            while [ "$active" -ge "$BATCH_SIZE" ]; do
+              sleep 30
+              # Count how many of our triggered runs are still active
+              active=0
+              while read -r rid; do
+                status=$(gh run view "$rid" --json status --jq '.status' 2>/dev/null || echo "completed")
+                [ "$status" != "completed" ] && active=$((active + 1))
+              done < /tmp/run_ids.txt
+              echo "  [$active/$BATCH_SIZE active, $(wc -l < /tmp/run_ids.txt) total triggered]"
+            done
+
+            # Trigger the workflow
+            echo "[+] Triggering $wf"
+            output=$(gh workflow run "$wf" -f fuzz_duration="$FUZZ_DURATION" 2>&1) || {
+              echo "  WARN: Failed to trigger $wf: $output"
+              continue
+            }
+
+            # Wait briefly for the run to appear
+            sleep 3
+
+            # Get the run ID of the just-triggered workflow
+            run_id=$(gh run list --workflow="$wf" --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null)
+            if [ -n "$run_id" ] && [ "$run_id" != "null" ]; then
+              echo "$run_id" >> /tmp/run_ids.txt
+              active=$((active + 1))
+              echo "  Started run $run_id (active: $active)"
+            fi
+          done
+
+          echo ""
+          echo "[+] All ${#WORKFLOWS[@]} workflows triggered"
+          echo "[+] Total runs tracked: $(wc -l < /tmp/run_ids.txt)"
+
+          # Save for the next step
+          cp /tmp/run_ids.txt $GITHUB_WORKSPACE/run_ids.txt
+
+      - name: Wait for all runs to complete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "[+] Waiting for all runs to complete..."
+          total=$(wc -l < run_ids.txt)
+
+          while true; do
+            completed=0
+            in_progress=0
+            while read -r rid; do
+              status=$(gh run view "$rid" --json status --jq '.status' 2>/dev/null || echo "completed")
+              if [ "$status" = "completed" ]; then
+                completed=$((completed + 1))
+              else
+                in_progress=$((in_progress + 1))
+              fi
+            done < run_ids.txt
+
+            echo "  [$(date -u +%H:%M:%S)] Completed: $completed / $total (in-progress: $in_progress)"
+
+            [ "$completed" -eq "$total" ] && break
+            sleep 60
+          done
+
+          echo "[+] All runs completed!"
+
+      - name: Generate summary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "# Test All Projects — Results" > summary.md
+          echo "" >> summary.md
+          echo "| # | Project | Status | Duration |" >> summary.md
+          echo "|---|---------|--------|----------|" >> summary.md
+
+          success=0
+          failure=0
+          total=0
+          idx=0
+
+          while read -r rid; do
+            idx=$((idx + 1))
+            info=$(gh run view "$rid" --json name,conclusion,createdAt,updatedAt 2>/dev/null)
+            name=$(echo "$info" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('name','?'))" 2>/dev/null || echo "?")
+            conclusion=$(echo "$info" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('conclusion','?'))" 2>/dev/null || echo "?")
+
+            created=$(echo "$info" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('createdAt',''))" 2>/dev/null)
+            updated=$(echo "$info" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('updatedAt',''))" 2>/dev/null)
+            duration=$(python3 -c "from datetime import datetime;c=datetime.fromisoformat('$created'.replace('Z','+00:00'));u=datetime.fromisoformat('$updated'.replace('Z','+00:00'));d=u-c;print(f'{int(d.total_seconds()//60)}m{int(d.total_seconds()%60)}s')" 2>/dev/null || echo "?")
+
+            project=$(echo "$name" | sed 's/^Fuzz //')
+            total=$((total + 1))
+
+            if [ "$conclusion" = "success" ]; then
+              status="pass"
+              success=$((success + 1))
+            else
+              status="FAIL"
+              failure=$((failure + 1))
+            fi
+
+            echo "| $idx | $project | $status | $duration |" >> summary.md
+          done < run_ids.txt
+
+          echo "" >> summary.md
+          echo "## Summary" >> summary.md
+          echo "" >> summary.md
+          echo "- **Total**: $total" >> summary.md
+          echo "- **Passed**: $success" >> summary.md
+          echo "- **Failed**: $failure" >> summary.md
+          echo "- **Pass rate**: $(python3 -c "print(f'{$success/$total*100:.1f}%')" 2>/dev/null || echo '?')" >> summary.md
+
+          cat summary.md
+          echo ""
+          echo "---"
+
+          # Print failed projects for quick reference
+          echo ""
+          echo "## Failed Projects"
+          while read -r rid; do
+            info=$(gh run view "$rid" --json name,conclusion 2>/dev/null)
+            conclusion=$(echo "$info" | python3 -c "import json,sys; print(json.load(sys.stdin).get('conclusion','?'))" 2>/dev/null)
+            if [ "$conclusion" = "failure" ]; then
+              name=$(echo "$info" | python3 -c "import json,sys; print(json.load(sys.stdin).get('name','?'))" 2>/dev/null)
+              echo "  - $name (https://github.com/${{ github.repository }}/actions/runs/$rid)"
+            fi
+          done < run_ids.txt
+
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-all-summary
+          path: summary.md
+          retention-days: 30

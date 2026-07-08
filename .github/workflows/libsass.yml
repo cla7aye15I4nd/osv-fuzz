@@ -51,7 +51,7 @@ jobs:
           export CC=afl-cc
           export CXX=afl-c++
           export CFLAGS="${CFLAGS:-} -fsanitize=address"
-          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address -include cstdint"
           export FUZZING_ENGINE=afl
           export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
           export SANITIZER=address

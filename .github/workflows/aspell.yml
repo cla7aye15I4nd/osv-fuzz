@@ -35,6 +35,7 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/gnuaspell/aspell.git /tmp/src/aspell
+          git clone --depth 1 --recursive https://github.com/gnuaspell/aspell-fuzz.git /tmp/src/aspell-fuzz
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -56,9 +57,9 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
-          cd /tmp/src/aspell
+          cd /tmp/src/aspell-fuzz
           set +e
-          pushd /tmp/src/aspell
+          pushd /tmp/src/aspell-fuzz
           ./ossfuzz.sh
           popd
           set -e

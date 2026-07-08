@@ -36,6 +36,8 @@ jobs:
             devscripts \
             equivs \
             git-core \
+            libwayland-dev \
+            libxkbcommon-dev \
             ninja-build \
             pkg-config
 

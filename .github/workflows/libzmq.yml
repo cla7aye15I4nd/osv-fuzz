@@ -42,6 +42,7 @@ jobs:
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/zeromq/libzmq.git /tmp/src/libzmq
           git clone --depth 1 --recursive https://github.com/zeromq/libzmq-fuzz-corpora.git /tmp/src/libzmq-fuzz-corpora
+          git clone --depth 1 https://github.com/jedisct1/libsodium.git /tmp/src/libsodium
 
       - name: Build fuzz targets with AFL++
         run: |

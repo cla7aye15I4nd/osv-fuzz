@@ -49,6 +49,7 @@ jobs:
             lzop \
             pkg-config \
             rar \
+            libxml2-dev \
             sharutils \
             zstd
 
@@ -90,7 +91,22 @@ jobs:
           FILES_TO_AVOID
           libxml2
           EOF
+          # Build libxml2 statically (oss-fuzz Docker puts it at /deps/libxml2.a)
+          cd /tmp/src/libxml2
+          mkdir -p build-libxml2 && cd build-libxml2
+          cmake -DBUILD_SHARED_LIBS=OFF \
+                -DLIBXML2_WITH_PYTHON=OFF \
+                -DLIBXML2_WITH_LZMA=OFF \
+                -DLIBXML2_WITH_ZLIB=OFF \
+                -DLIBXML2_WITH_TESTS=OFF \
+                -DCMAKE_C_COMPILER="${CC}" \
+                -DCMAKE_C_FLAGS="${CFLAGS}" \
+                ..
+          make -j$(nproc)
           DEPS=/deps
+          mkdir -p ${DEPS}
+          find . -name "libxml2.a" -exec cp {} ${DEPS}/libxml2.a \;
+          ls -la ${DEPS}/libxml2.a
           cd /tmp/src/libarchive
           mkdir build2
           cd build2

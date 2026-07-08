@@ -75,6 +75,13 @@ jobs:
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/libheif
+          # Patch build-oss-fuzz.sh to run on GitHub Actions (non-root user)
+          # - Add sudo to apt-get commands (script expects Docker root)
+          sed -i 's/^apt-get/sudo apt-get/g' scripts/build-oss-fuzz.sh
+          # - Remove pip3 install (system meson is new enough; pip3 blocked by PEP 668)
+          sed -i '/^pip3 install/d' scripts/build-oss-fuzz.sh
+          # - Fix x265 clone URL (bitbucket web URL is not a valid git URL)
+          sed -i 's|https://bitbucket.org/multicoreware/x265_git/src/stable/|https://bitbucket.org/multicoreware/x265_git.git|' scripts/build-oss-fuzz.sh
           set +e
           ./scripts/build-oss-fuzz.sh
           python3 "/tmp/src/generate_seeds.py" "/tmp/src/generated_heif_seeds"

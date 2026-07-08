@@ -37,8 +37,8 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/davea42/libdwarf-code /tmp/tmp/src/libdwarf
-          git clone --depth 1 --recursive https://github.com/davea42/libdwarf-binary-samples /tmp/tmp/src/libdwarf-binary-samples
+          git clone --depth 1 --recursive https://github.com/davea42/libdwarf-code /tmp/src/libdwarf
+          git clone --depth 1 --recursive https://github.com/davea42/libdwarf-binary-samples /tmp/src/libdwarf-binary-samples
 
       - name: Build fuzz targets with AFL++
         run: |

@@ -37,8 +37,20 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/libjpeg-turbo/fuzz /tmp/src/fuzz
-          git clone --depth 1 --recursive https://github.com/libjpeg-turbo/seed-corpora /tmp/src/seed-corpora
+          git clone --depth 1 https://github.com/libjpeg-turbo/fuzz /tmp/src/fuzz
+          cat /tmp/src/fuzz/branches.txt | while read branch; do
+            git clone --depth 1 https://github.com/libjpeg-turbo/libjpeg-turbo -b "$branch" "/tmp/src/libjpeg-turbo.$branch"
+          done
+          git clone --depth 1 https://github.com/libjpeg-turbo/seed-corpora /tmp/src/seed-corpora
+          cd /tmp/src/seed-corpora && zip -r /tmp/src/decompress_fuzzer_seed_corpus.zip afl-testcases/jpeg* bugs/decompress*
+          cat /tmp/src/fuzz/branches.txt | while read branch; do
+            cd /tmp/src && zip -r decompress_fuzzer_seed_corpus.zip "libjpeg-turbo.$branch/testimages/"*.jpg
+          done
+          cd /tmp/src/seed-corpora && zip -r /tmp/src/compress_fuzzer_seed_corpus.zip afl-testcases/bmp afl-testcases/gif* afl-testcases/targa bugs/compress*
+          cat /tmp/src/fuzz/branches.txt | while read branch; do
+            cd /tmp/src && zip -r compress_fuzzer_seed_corpus.zip "libjpeg-turbo.$branch/testimages/"*.bmp "libjpeg-turbo.$branch/testimages/"*.ppm "libjpeg-turbo.$branch/testimages/"*.pgm
+          done
+          rm -rf /tmp/src/seed-corpora
 
       - name: Build fuzz targets with AFL++
         run: |

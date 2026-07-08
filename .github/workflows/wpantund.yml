@@ -36,6 +36,7 @@ jobs:
             automake \
             gdb \
             libboost-dev \
+            libboost-signals-dev \
             libdbus-1-dev \
             libtool \
             pkg-config

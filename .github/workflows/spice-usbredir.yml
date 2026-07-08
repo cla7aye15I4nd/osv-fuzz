@@ -39,7 +39,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://gitlab.freedesktop.org/spice/usbredir.git /tmp/tmp/src/spice-usbredir
+          git clone --depth 1 --recursive https://gitlab.freedesktop.org/spice/usbredir.git /tmp/src/spice-usbredir
 
       - name: Build fuzz targets with AFL++
         run: |

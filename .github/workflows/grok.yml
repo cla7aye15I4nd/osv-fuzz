@@ -42,8 +42,8 @@ jobs:
           mkdir -p build/fuzz-targets /tmp/work
           export CC=afl-cc
           export CXX=afl-c++
-          export CFLAGS="${CFLAGS:-} -fsanitize=address"
-          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export CFLAGS="${CFLAGS:-} -fsanitize=address -Wno-error"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address -Wno-error -include cstdint"
           export FUZZING_ENGINE=afl
           export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
           export SANITIZER=address
@@ -62,7 +62,9 @@ jobs:
           export GRK_DATA_ROOT=/tmp/src/grok-data
           mkdir build
           cd build
-          cmake .. -DGRK_BUILD_CODEC=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
+          cmake .. -DGRK_BUILD_CODEC=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF \
+            -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX \
+            -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS"
           make clean -s
           make -j$(nproc) -s
           cd ..
