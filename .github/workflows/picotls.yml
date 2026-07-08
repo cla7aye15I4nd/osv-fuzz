@@ -66,8 +66,9 @@ jobs:
           cd /tmp/src/picotls
           set +e
           pushd /tmp/src/picotls
-          cmake -DBUILD_FUZZER=ON -DOSS_FUZZ=ON .
-          make
+          cmake -DBUILD_FUZZER=ON .
+          make -j$(nproc)
+          cp ./fuzz-asn1 $GITHUB_WORKSPACE/build/fuzz-targets/
           cp ./fuzz-client-hello $GITHUB_WORKSPACE/build/fuzz-targets/
           cp ./fuzz-server-hello $GITHUB_WORKSPACE/build/fuzz-targets/
           zip -jr $GITHUB_WORKSPACE/build/fuzz-targets/fuzz-client-hello_seed_corpus.zip /tmp/src/picotls/fuzz/fuzz-client-hello-corpus

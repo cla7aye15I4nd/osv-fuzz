@@ -38,8 +38,8 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/open62541/open62541.git /tmp/src/-bmaster
-          git clone --depth 1 --recursive https://github.com/open62541/open62541.git /tmp/tmp/src/open62541_15
+          git clone --depth 1 --recursive https://github.com/open62541/open62541.git /tmp/src/open62541
+          git clone --depth 1 --recursive https://github.com/open62541/open62541.git /tmp/src/open62541_15
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -67,14 +67,14 @@ jobs:
               local SRC_DIR=$1
               local SUFFIX=$2
               local WORK_DIR="/tmp/work/open62541${SUFFIX}"
-              mkdir -p "/tmp/work_DIR"
-              cd "/tmp/work_DIR"
+              mkdir -p "$WORK_DIR"
+              cd "$WORK_DIR"
               local OUT_DIR="$GITHUB_WORKSPACE/build/fuzz-targets"
               if [[ -n "$SUFFIX" ]]; then
                   OUT_DIR="/tmp/work/out${SUFFIX}"
-                  mkdir -p "$GITHUB_WORKSPACE/build/fuzz-targets_DIR"
+                  mkdir -p "$OUT_DIR"
               fi
-              OUT="$GITHUB_WORKSPACE/build/fuzz-targets_DIR" cmake \
+              OUT="$OUT_DIR" cmake \
                   -DCMAKE_BUILD_TYPE=Debug \
                   -DUA_ENABLE_AMALGAMATION=OFF \
                   -DPYTHON_EXECUTABLE:FILEPATH=/usr/bin/python3 \
@@ -83,19 +83,19 @@ jobs:
                   -DUA_LOGLEVEL=600 \
                   -DUA_ENABLE_ENCRYPTION=ON \
                   -DUA_BUILD_OSS_FUZZ=ON \
-                  "/tmp/src_DIR/"
+                  "$SRC_DIR/"
               make -j"$(nproc)"
               if [[ -n "$SUFFIX" ]]; then
-                  for f in "$GITHUB_WORKSPACE/build/fuzz-targets_DIR"/*; do
+                  for f in "$OUT_DIR"/*; do
                       [[ -f "$f" && -x "$f" ]] || continue
                       fname=$(basename "$f")
                       cp "$f" "$GITHUB_WORKSPACE/build/fuzz-targets/${fname}${SUFFIX}"
                   done
               fi
-              fuzzerFiles=$(find "/tmp/src_DIR/tests/fuzz/" -maxdepth 1 -name "*.cc")
+              fuzzerFiles=$(find "$SRC_DIR/tests/fuzz/" -maxdepth 1 -name "*.cc")
               for F in $fuzzerFiles; do
                   fuzzerName=$(basename "$F" .cc)
-                  corpusDir="/tmp/src_DIR/tests/fuzz/${fuzzerName}_corpus"
+                  corpusDir="$SRC_DIR/tests/fuzz/${fuzzerName}_corpus"
                   if [[ -d "$corpusDir" ]]; then
                       zip -jr "$GITHUB_WORKSPACE/build/fuzz-targets/${fuzzerName}${SUFFIX}_seed_corpus.zip" "$corpusDir/"
                   fi
@@ -104,18 +104,18 @@ jobs:
                   cp "$GITHUB_WORKSPACE/build/fuzz-targets/fuzz_binary_message${SUFFIX}_seed_corpus.zip" \
                      "$GITHUB_WORKSPACE/build/fuzz-targets/fuzz_tcp_message${SUFFIX}_seed_corpus.zip"
               fi
-              for optFile in "/tmp/src_DIR/tests/fuzz/"*.options; do
+              for optFile in "$SRC_DIR/tests/fuzz/"*.options; do
                   [[ -f "$optFile" ]] || continue
                   base=$(basename "$optFile" .options)
                   cp "$optFile" "$GITHUB_WORKSPACE/build/fuzz-targets/${base}${SUFFIX}.options"
               done
-              for dictFile in "/tmp/src_DIR/tests/fuzz/"*.dict; do
+              for dictFile in "$SRC_DIR/tests/fuzz/"*.dict; do
                   [[ -f "$dictFile" ]] || continue
                   cp "$dictFile" "$GITHUB_WORKSPACE/build/fuzz-targets/"
               done
-              local mdns_copy="/tmp/src_DIR/deps/mdnsd/tests/fuzz/oss-fuzz-copy.sh"
+              local mdns_copy="$SRC_DIR/deps/mdnsd/tests/fuzz/oss-fuzz-copy.sh"
               if [[ -f "$mdns_copy" ]]; then
-                  SRC="/tmp/src_DIR/deps" "$mdns_copy"
+                  SRC="$SRC_DIR/deps" "$mdns_copy"
               fi
           }
           build_open62541_fuzzers "/tmp/src/open62541" ""

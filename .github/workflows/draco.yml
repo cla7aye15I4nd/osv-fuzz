@@ -59,7 +59,7 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
-          cd /tmp/src/$WORK/
+          cd $WORK
           set +e
           sh /tmp/src/draco/src/draco/tools/fuzz/build.sh
           set -e

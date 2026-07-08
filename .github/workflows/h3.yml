@@ -75,7 +75,7 @@ jobs:
           cd build
           cmake -DBUILD_TESTING=ON ..
           make -j$(nproc) all
-          H3_BASE=/src/h3/
+          H3_BASE=/tmp/src/h3
           for fuzzer in $(find $H3_BASE/src/apps/fuzzers -name '*.c'); do
             fuzzer_basename=$(basename -s .c $fuzzer)
             $CC $CFLAGS -DH3_PREFIX="" \
