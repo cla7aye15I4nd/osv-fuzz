@@ -34,6 +34,8 @@ jobs:
             autoconf \
             automake \
             bison \
+            libc++-dev \
+            libc++abi-dev \
             libtool \
             pkg-config \
             re2c
