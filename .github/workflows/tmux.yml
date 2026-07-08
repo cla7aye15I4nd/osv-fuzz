@@ -35,6 +35,7 @@ jobs:
             automake \
             bison \
             cmake \
+            libc++-dev \
             libtool \
             ncurses-dev \
             pkg-config
