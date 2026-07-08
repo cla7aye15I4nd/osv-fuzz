@@ -64,7 +64,8 @@ jobs:
           # Take ownership of /usr/local for install commands (Docker runs as root)
           sudo chown -R $(id -u):$(id -g) /usr/local 2>/dev/null || true
           # Allow ldconfig to update cache
-          sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
+          sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
+          sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/p11-kit
           set +e
