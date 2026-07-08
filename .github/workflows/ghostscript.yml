@@ -34,8 +34,7 @@ jobs:
             autoconf \
             liblcms2-dev \
             libpng-dev \
-            libtool \
-            zlibc
+            libtool
 
       - name: Clone source
         run: |

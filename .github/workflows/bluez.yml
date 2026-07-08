@@ -41,7 +41,7 @@ jobs:
             libtool \
             libudev-dev \
             pkg-config \
-            python-docutils \
+            python3-docutils \
             systemd \
             udev
 

@@ -52,7 +52,6 @@ jobs:
             libjsoncpp-dev \
             liblz4-dev \
             liblzma-dev \
-            libnetcdf-cxx-legacy-dev \
             libnetcdf-dev \
             libogg-dev \
             libpng-dev \

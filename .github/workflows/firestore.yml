@@ -35,8 +35,8 @@ jobs:
             automake \
             golang \
             libtool \
-            python-protobuf \
-            python-six
+            python3-protobuf \
+            python3-six
 
       - name: Clone source
         run: |

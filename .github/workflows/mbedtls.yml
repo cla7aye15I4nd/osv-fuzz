@@ -32,7 +32,6 @@ jobs:
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
             cmake \
-            python-all-dev \
             python3-all-dev
 
       - name: Clone source
