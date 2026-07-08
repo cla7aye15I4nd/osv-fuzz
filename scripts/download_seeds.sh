@@ -10,8 +10,12 @@ mkdir -p "$DEST"
 echo "[+] Downloading seeds for $PROJECT from R2 bucket $BUCKET..."
 
 # Download manifest first
-npx wrangler r2 object get "$BUCKET/seeds/${PROJECT}/manifest.json" \
-    --remote --file "$DEST/manifest.json" 2>/dev/null
+if ! npx wrangler r2 object get "$BUCKET/seeds/${PROJECT}/manifest.json" \
+    --remote --file "$DEST/manifest.json" 2>/dev/null; then
+    echo "[!] Failed to download manifest — seeds may not be uploaded yet"
+    echo "[+] Downloaded 0 seeds to $DEST"
+    exit 0
+fi
 
 # Parse manifest and download each seed
 python3 -c "
