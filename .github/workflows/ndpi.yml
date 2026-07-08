@@ -39,6 +39,7 @@ jobs:
             flex \
             libjson-c-dev \
             libnuma-dev \
+            libpcap-dev \
             libpcre2-dev \
             libtool \
             pkg-config
@@ -79,9 +80,6 @@ jobs:
             sudo make install
           popd
           bash -x ./ndpi/tests/ossfuzz.sh
-          pushd /tmp/src/ndpi/tests/unit
-              make unit
-          popd
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)

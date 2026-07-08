@@ -35,11 +35,11 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/openssl/openssl.git /tmp/src/openssl
-          git clone --depth 1 --recursive https://github.com/openssl/openssl.git /tmp/src/openssl30
-          git clone --depth 1 --recursive https://github.com/openssl/openssl.git /tmp/src/openssl33
-          git clone --depth 1 --recursive https://github.com/openssl/openssl.git /tmp/src/openssl34
-          git clone --depth 1 --recursive https://github.com/openssl/openssl.git /tmp/src/openssl35
-          git clone --depth 1 --recursive https://github.com/openssl/openssl.git /tmp/src/openssl36
+          git clone --depth 1 --recursive --branch openssl-3.0 https://github.com/openssl/openssl.git /tmp/src/openssl30
+          git clone --depth 1 --recursive --branch openssl-3.3 https://github.com/openssl/openssl.git /tmp/src/openssl33
+          git clone --depth 1 --recursive --branch openssl-3.4 https://github.com/openssl/openssl.git /tmp/src/openssl34
+          git clone --depth 1 --recursive --branch openssl-3.5 https://github.com/openssl/openssl.git /tmp/src/openssl35
+          git clone --depth 1 --recursive --branch openssl-3.6 https://github.com/openssl/openssl.git /tmp/src/openssl36
 
       - name: Download fuzzer files from oss-fuzz
         run: |
@@ -56,7 +56,7 @@ jobs:
           export CC=afl-cc
           export CXX=afl-c++
           export CFLAGS="${CFLAGS:-} -fsanitize=address"
-          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address -fsanitize=fuzzer"
           export FUZZING_ENGINE=afl
           export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
           export SANITIZER=address
@@ -64,6 +64,10 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Create empty libFuzzingEngine.a — OpenSSL's configure hardcodes
+          # --with-fuzzer-lib=/usr/lib/libFuzzingEngine; the actual main is
+          # provided by afl-c++ via -fsanitize=fuzzer in CXXFLAGS/LDCMD.
+          sudo ar rcs /usr/lib/libFuzzingEngine.a
           # Take ownership of /usr/local for install commands (Docker runs as root)
           sudo chown -R $(id -u):$(id -g) /usr/local 2>/dev/null || true
           # Allow ldconfig to update cache
