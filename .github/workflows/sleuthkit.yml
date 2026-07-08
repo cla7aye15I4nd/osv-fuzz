@@ -1,4 +1,4 @@
-name: "Fuzz gstreamer"
+name: "Fuzz sleuthkit"
 
 on:
   workflow_dispatch:
@@ -7,10 +7,10 @@ on:
         description: "Fuzzing duration in seconds"
         default: "1800"
   schedule:
-    - cron: "0 10 * * 0"
+    - cron: "0 5 * * 0"
 
 env:
-  PROJECT: gstreamer
+  PROJECT: sleuthkit
   FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -33,34 +33,21 @@ jobs:
           sudo apt-get install -y -qq \
             autoconf \
             automake \
-            bison \
-            flex \
-            libglib2.0-dev \
-            liblzma-dev \
             libtool \
-            nasm \
-            ninja-build \
-            patchelf \
-            pkg-config
-          pip3 install meson
+            zlib1g-dev
 
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://gitlab.freedesktop.org/gstreamer/gstreamer.git /tmp/src/gstreamer
-
-      - name: Download fuzzer files from oss-fuzz
-        run: |
-          mkdir -p /tmp/src
-          curl -sL -o /tmp/src/generate_seeds.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/gstreamer/generate_seeds.py"
+          git clone --depth 1 https://github.com/sleuthkit/sleuthkit.git /tmp/src/sleuthkit
 
       - name: Build fuzz targets with AFL++
         run: |
           mkdir -p build/fuzz-targets /tmp/work
           export CC=afl-cc
           export CXX=afl-c++
-          export CFLAGS="${CFLAGS:-} -fsanitize=address"
-          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export CFLAGS="${CFLAGS:-} -fsanitize=address -Wno-error=non-c-typedef-for-linkage"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address -Wno-error=non-c-typedef-for-linkage"
           export FUZZING_ENGINE=afl
           export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
           export SANITIZER=address
@@ -74,28 +61,34 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
-          cd /tmp/src/gstreamer
+          cd /tmp/src/sleuthkit
           set +e
-          if grep -q -F "20.04" /etc/os-release ; then
-              pushd /tmp
-              wget https://archive.ubuntu.com/ubuntu/pool/main/a/autoconf/autoconf_2.71-2_all.deb
-              if echo "96b528889794c4134015a63c75050f93d8aecdf5e3f2a20993c1433f4c61b80e autoconf_2.71-2_all.deb" | sha256sum --check --status ; then
-                  dpkg -i -G /tmp/autoconf_2.71-2_all.deb
-              fi
-              popd
+          # Work around -all-static flag (see sleuthkit issue #3020)
+          sed -i 's/-all-static//g' configure.ac
+          # Work around hardcoded -Werror flags (see sleuthkit issue #3012)
+          sed -i 's/-Werror//g' Makefile.am
+          # Download seed corpora (non-fatal if some downloads fail)
+          if [ -x ./ossfuzz/buildcorpus.sh ]; then
+              ./ossfuzz/buildcorpus.sh || true
+              # Package any downloaded corpus files
+              for corpus_dir in ./ossfuzz/*_seed_corpus; do
+                  if [ -d "$corpus_dir" ]; then
+                      target=$(basename "$corpus_dir" _seed_corpus)
+                      zip -j -q "$OUT/${target}_seed_corpus.zip" "$corpus_dir"/* || true
+                  fi
+              done
+              # Also package any .zip corpora already built by buildcorpus.sh
+              find ./ossfuzz -name '*_seed_corpus.zip' -exec cp {} "$OUT/" \; 2>/dev/null || true
           fi
-          /tmp/src/gstreamer/ci/fuzzing/build-oss-fuzz.sh
-          python3 /tmp/src/generate_seeds.py /tmp/src/generated_seeds
-          for target in gst-codec-utils gst-tag gst-subparse typefind gst-discoverer; do
-            seeddir="/tmp/src/generated_seeds/$target"
-            if [ -d "$seeddir" ]; then
-              zip -j -q "$GITHUB_WORKSPACE/build/fuzz-targets/${target}_seed_corpus.zip" "$seeddir"/*
-            fi
-          done
-          for ft in gst-tag; do
-            echo "[libfuzzer]" > $GITHUB_WORKSPACE/build/fuzz-targets/${ft}.options
-            echo "detect_leaks=0" >> $GITHUB_WORKSPACE/build/fuzz-targets/${ft}.options
-          done
+          ./bootstrap
+          ./configure --enable-static --enable-shared=no \
+              --disable-java --without-afflib --without-libcrypto \
+              --without-libewf --without-libvhdi --without-libvmdk
+          make -j$(nproc)
+          # Copy fuzzer binaries — they may be in root, ossfuzz/, or .libs/
+          find . -name '*_fuzzer' -type f -executable -exec cp {} "$OUT/" \;
+          # Also check .libs directories for libtool-wrapped binaries
+          find . -path '*/.libs/*_fuzzer' -type f -executable -exec cp {} "$OUT/" \; 2>/dev/null || true
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)

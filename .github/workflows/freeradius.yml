@@ -1,4 +1,4 @@
-name: "Fuzz gstreamer"
+name: "Fuzz freeradius"
 
 on:
   workflow_dispatch:
@@ -7,10 +7,10 @@ on:
         description: "Fuzzing duration in seconds"
         default: "1800"
   schedule:
-    - cron: "0 10 * * 0"
+    - cron: "0 4 * * 0"
 
 env:
-  PROJECT: gstreamer
+  PROJECT: freeradius
   FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -31,28 +31,23 @@ jobs:
         run: |
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
-            autoconf \
-            automake \
-            bison \
-            flex \
-            libglib2.0-dev \
-            liblzma-dev \
-            libtool \
-            nasm \
-            ninja-build \
+            libjson-c-dev \
+            libkqueue-dev \
+            libssl-dev \
+            libtalloc-dev \
+            libunwind-dev \
             patchelf \
-            pkg-config
-          pip3 install meson
+            zip
 
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://gitlab.freedesktop.org/gstreamer/gstreamer.git /tmp/src/gstreamer
+          git clone --depth 1 https://github.com/FreeRADIUS/freeradius-server.git /tmp/src/freeradius-server
 
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sL -o /tmp/src/generate_seeds.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/gstreamer/generate_seeds.py"
+          curl -sL -o /tmp/src/generate_seeds.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/freeradius/generate_seeds.py"
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -74,27 +69,55 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
-          cd /tmp/src/gstreamer
+          cd /tmp/src/freeradius-server
           set +e
-          if grep -q -F "20.04" /etc/os-release ; then
-              pushd /tmp
-              wget https://archive.ubuntu.com/ubuntu/pool/main/a/autoconf/autoconf_2.71-2_all.deb
-              if echo "96b528889794c4134015a63c75050f93d8aecdf5e3f2a20993c1433f4c61b80e autoconf_2.71-2_all.deb" | sha256sum --check --status ; then
-                  dpkg -i -G /tmp/autoconf_2.71-2_all.deb
+          # Normalize source-tree timestamps to avoid clock-skew build loops
+          find . -exec touch {} +
+          # Fix fuzzer .mk files missing TGT_LDLIBS (link failure on ubuntu-24-04)
+          for mk in src/fuzzer/fuzzer_cf.mk src/fuzzer/fuzzer_value.mk src/fuzzer/fuzzer_xlat.mk; do
+              if [ -f "$mk" ] && ! grep -q '^TGT_LDLIBS' "$mk"; then
+                  echo 'TGT_LDLIBS		:= $(LIBS)' >> "$mk"
               fi
-              popd
-          fi
-          /tmp/src/gstreamer/ci/fuzzing/build-oss-fuzz.sh
-          python3 /tmp/src/generate_seeds.py /tmp/src/generated_seeds
-          for target in gst-codec-utils gst-tag gst-subparse typefind gst-discoverer; do
-            seeddir="/tmp/src/generated_seeds/$target"
-            if [ -d "$seeddir" ]; then
-              zip -j -q "$GITHUB_WORKSPACE/build/fuzz-targets/${target}_seed_corpus.zip" "$seeddir"/*
-            fi
           done
-          for ft in gst-tag; do
-            echo "[libfuzzer]" > $GITHUB_WORKSPACE/build/fuzz-targets/${ft}.options
-            echo "detect_leaks=0" >> $GITHUB_WORKSPACE/build/fuzz-targets/${ft}.options
+          # Configure with fuzzer support
+          ./configure --enable-fuzzer --enable-address-sanitizer
+          # make tries to compile regular programs as fuzz targets
+          # so -i flag ignores these errors
+          make -i -j$(nproc)
+          make -i install
+          sudo ldconfig
+          # Copy fuzzer binaries with their shared library dependencies
+          mkdir -p $OUT/lib
+          copy_lib() {
+              local fuzzer_path=$1
+              local lib=$2
+              local libpath
+              libpath=$(ldd "${fuzzer_path}" 2>/dev/null | grep "${lib}" | awk '{ print $3 }')
+              if [ -n "$libpath" ] && [ -f "$libpath" ]; then
+                  cp "$libpath" "${OUT}/lib/"
+              fi
+          }
+          ls ./build/bin/local/fuzzer_* 2>/dev/null | while read i; do
+              patchelf --set-rpath '$ORIGIN/lib' "${i}"
+              copy_lib "${i}" libfreeradius
+              copy_lib "${i}" talloc
+              copy_lib "${i}" kqueue
+              copy_lib "${i}" libunwind
+              cp "${i}" "$OUT/"
+          done
+          # Copy dictionary files needed at runtime
+          if [ -d /usr/local/share/freeradius/dictionary ]; then
+              cp -r /usr/local/share/freeradius/dictionary $OUT/dict
+          elif [ -d /usr/local/share/freeradius ]; then
+              cp -r /usr/local/share/freeradius $OUT/dict
+          fi
+          # Generate structured seed corpora
+          python3 /tmp/src/generate_seeds.py /tmp/src/generated_seeds
+          for seeddir in /tmp/src/generated_seeds/*/; do
+              proto=$(basename "$seeddir")
+              if [ -f "$OUT/fuzzer_${proto}" ]; then
+                  zip -j -q "$OUT/fuzzer_${proto}_seed_corpus.zip" "$seeddir"/* || true
+              fi
           done
           set -e
           # Verify at least one fuzz target was built
