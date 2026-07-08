@@ -30,6 +30,19 @@ jobs:
       - name: Install AFL++ and dependencies
         run: |
           bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            gperf \
+            m4 \
+            gettext \
+            python3-pip \
+            python3-jinja2 \
+            libmount-dev \
+            ninja-build \
+            patchelf \
+            wget \
+            zstd \
+            zip
+          pip3 install --break-system-packages meson
 
       - name: Clone source
         run: |
@@ -43,6 +56,7 @@ jobs:
           export CXX=afl-c++
           export CFLAGS="${CFLAGS:-} -fsanitize=address"
           export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export LDFLAGS=""
           export FUZZING_ENGINE=afl
           export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
           export SANITIZER=address
@@ -50,16 +64,67 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
-          # Take ownership of /usr/local for install commands (Docker runs as root)
-          sudo chown -R $(id -u):$(id -g) /usr/local 2>/dev/null || true
-          # Allow ldconfig to update cache
-          sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
-          sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
-          echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+
           cd /tmp/src/systemd
-          set +e
-          tools/oss-fuzz.sh
-          set -e
+
+          # Install pinned Python build requirements (meson/ninja versions)
+          pip3 install --break-system-packages \
+            -r .github/workflows/requirements.txt 2>/dev/null || true
+
+          # Set PYTHONPATH so systemd code generators find system packages
+          ORIG_PYTHONPATH=$(python3 -c 'import sys;print(":".join(sys.path[1:]))')
+          export PYTHONPATH="$ORIG_PYTHONPATH:/usr/lib/python3/dist-packages/"
+
+          # Configure with meson — minimal feature set for fuzzing
+          build="$WORK/build"
+          rm -rf "$build"
+          mkdir -p "$build"
+
+          if ! meson setup "$build" \
+            -Db_lundef=false \
+            -Doss-fuzz=true \
+            --auto-features=disabled \
+            -Dlibmount=enabled \
+            -Dnspawn=enabled \
+            -Dresolve=true; then
+            cat "$build/meson-logs/meson-log.txt" 2>/dev/null || true
+            exit 1
+          fi
+
+          ninja -v -C "$build" fuzzers
+
+          # Install shared libraries needed at runtime
+          install -Dt "$OUT/src/shared/" \
+            "$build"/src/shared/libsystemd-shared-*.so \
+            "$build"/src/core/libsystemd-core-*.so
+
+          # Copy fuzz targets to output directory
+          find "$build" -maxdepth 1 -type f -executable -name "fuzz-*" \
+            -exec mv {} "$OUT" \;
+
+          # Copy dictionaries and options files
+          find src -type f -name "fuzz-*.dict" -exec cp {} "$OUT" \;
+          cp src/fuzz/*.options "$OUT" 2>/dev/null || true
+
+          # Package seed corpora from test data
+          for d in test/fuzz/fuzz-*; do
+            [ -d "$d" ] || continue
+            fuzzer="$(basename "$d")"
+            readarray -t generated < <(find "$build/test/fuzz" -maxdepth 1 \
+              -name "${fuzzer}*" -type f 2>/dev/null)
+            zip -jqr "$OUT/${fuzzer}_seed_corpus.zip" "$d" \
+              "${generated[@]}" 2>/dev/null || true
+          done
+
+          # Package BCD test data as seed corpus
+          bcd=$(mktemp -d)
+          for i in test/test-bcd/*.zst; do
+            [ -f "$i" ] || continue
+            unzstd "$i" -o "$bcd/$(basename "${i%.zst}")" 2>/dev/null || true
+          done
+          zip -jqr "$OUT/fuzz-bcd_seed_corpus.zip" "$bcd" 2>/dev/null || true
+          rm -rf "$bcd"
+
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
           echo "[+] Built $target_count fuzz targets"
