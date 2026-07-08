@@ -61,8 +61,8 @@ jobs:
           mkdir build && cd build
           cmake -DBUILD_WASI=none ..
           make -j$(nproc)
-          $CC $CFLAGS -c /tmp/src/wasm3/platforms/app_fuzz/fuzzer.c -o fuzzer.o -I/src/wasm3/source
-          $CXX $CXXFLAGS $LIB_FUZZING_ENGINE -o $GITHUB_WORKSPACE/build/fuzz-targets/fuzzer fuzzer.o /src/wasm3/build/source/libm3.a
+          $CC $CFLAGS -c $SRC/wasm3/platforms/app_fuzz/fuzzer.c -o fuzzer.o -I$SRC/wasm3/source
+          $CXX $CXXFLAGS $LIB_FUZZING_ENGINE -o $OUT/fuzzer fuzzer.o $SRC/wasm3/build/source/libm3.a
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)

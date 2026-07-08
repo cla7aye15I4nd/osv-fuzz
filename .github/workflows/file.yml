@@ -31,7 +31,12 @@ jobs:
         run: |
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
-            liblzma-dev
+            shtool \
+            libbz2-dev \
+            liblzma-dev \
+            zlib1g-dev \
+            libzstd-dev \
+            liblz4-dev
 
       - name: Clone source
         run: |

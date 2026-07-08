@@ -36,13 +36,15 @@ jobs:
             libc-ares-dev \
             libgcrypt20-dev \
             libglib2.0-dev \
-            ninja-build
+            ninja-build \
+            wget
 
       - name: Clone source
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://gitlab.com/wireshark/wireshark.git /tmp/src/wireshark
           git clone --depth 1 --recursive https://bitbucket.org/jwzawadzki/wireshark-fuzzdb.git /tmp/src/wireshark-fuzzdb
+          wget -q -O /tmp/src/libxml2-2.12.10.tar.xz https://download.gnome.org/sources/libxml2/2.12/libxml2-2.12.10.tar.xz
 
       - name: Build fuzz targets with AFL++
         run: |

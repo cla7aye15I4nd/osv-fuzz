@@ -36,8 +36,8 @@ jobs:
             gtk-doc-tools \
             libffi-dev \
             libtool \
-            meson \
             ninja-build
+          pip3 install meson
 
       - name: Clone source
         run: |
