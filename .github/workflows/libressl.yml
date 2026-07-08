@@ -62,15 +62,17 @@ jobs:
           export CFLAGS="${CFLAGS:-} -fsanitize=address"
           export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
           export FUZZING_ENGINE=afl
-          export LIB_FUZZING_ENGINE=""
+          export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
           export SANITIZER=address
           export ARCHITECTURE=x86_64
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
-          # Make /usr/local writable for install commands
-          sudo chmod -R a+w /usr/local/lib /usr/local/include /usr/local/bin 2>/dev/null || true
-          sudo mkdir -p /usr/local/lib/pkgconfig && sudo chmod a+w /usr/local/lib/pkgconfig 2>/dev/null || true
+          # Take ownership of /usr/local for install commands (Docker runs as root)
+          sudo chown -R $(id -u):$(id -g) /usr/local 2>/dev/null || true
+          # Allow ldconfig to update cache
+          sudo chmod a+w /etc/ld.so.cache 2>/dev/null || true
+          echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/libressl
           cd /tmp/src/
           tar jxf boost_1_84_0.tar.bz2
