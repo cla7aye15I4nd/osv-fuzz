@@ -53,7 +53,7 @@ jobs:
           git clone --depth 1 --recursive git://gerrit.libreoffice.org/libfreehand /tmp/src/libfreehand
           git clone --depth 1 --recursive git://git.code.sf.net/p/libwpd/code /tmp/src/libwpd
           git clone --depth 1 --recursive git://git.code.sf.net/p/libwpg/code /tmp/src/libwpg
-          git clone --depth 1 --recursive https://github.com/fosnola/libstaroffice /tmp/src/&&
+          git clone --depth 1 --recursive https://github.com/fosnola/libstaroffice /tmp/src/libstaroffice
           git clone --depth 1 --recursive git://git.code.sf.net/p/libwps/code /tmp/src/libwps
           git clone --depth 1 --recursive git://git.code.sf.net/p/libmwaw/libmwaw /tmp/src/libmwaw
           git clone --depth 1 --recursive git://git.code.sf.net/p/libebook/code /tmp/src/libe-book

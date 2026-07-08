@@ -37,8 +37,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/libjpeg-turbo/fuzz /tmp/src/&&
-          git clone --depth 1 --recursive https://github.com/libjpeg-turbo/libjpeg-turbo /tmp/src/-b
+          git clone --depth 1 --recursive https://github.com/libjpeg-turbo/fuzz /tmp/src/fuzz
           git clone --depth 1 --recursive https://github.com/libjpeg-turbo/seed-corpora /tmp/src/seed-corpora
 
       - name: Build fuzz targets with AFL++

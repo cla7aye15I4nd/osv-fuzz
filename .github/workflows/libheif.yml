@@ -31,6 +31,11 @@ jobs:
         run: |
           bash scripts/setup_aflpp.sh
 
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 --recursive https://github.com/strukturag/libheif.git /tmp/src/libheif
+
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src

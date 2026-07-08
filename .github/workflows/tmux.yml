@@ -41,7 +41,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/libevent/libevent.git /tmp/src/&&
+          git clone --depth 1 --recursive https://github.com/libevent/libevent.git /tmp/src/libevent
           git clone --depth 1 --recursive https://github.com/tmux/tmux.git /tmp/src/tmux
           git clone --depth 1 --recursive https://github.com/tmux/tmux-fuzzing-corpus.git /tmp/src/tmux-fuzzing-corpus
 

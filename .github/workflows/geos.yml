@@ -36,7 +36,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://git.osgeo.org/gitea/geos/geos.git /tmp/src/||
+          git clone --depth 1 --recursive https://git.osgeo.org/gitea/geos/geos.git /tmp/src/geos
 
       - name: Build fuzz targets with AFL++
         run: |

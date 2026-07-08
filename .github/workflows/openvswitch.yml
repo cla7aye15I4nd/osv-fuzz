@@ -41,7 +41,7 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/openvswitch/ovs.git /tmp/src/openvswitch
-          git clone --depth 1 --recursive https://github.com/openvswitch/ovs-fuzzing-corpus.git /tmp/src/\
+          git clone --depth 1 --recursive https://github.com/openvswitch/ovs-fuzzing-corpus.git /tmp/src/ovs-fuzzing-corpus
 
       - name: Build fuzz targets with AFL++
         run: |

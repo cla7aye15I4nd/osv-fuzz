@@ -52,7 +52,7 @@ jobs:
           mkdir -p /tmp/src
           git clone --depth 1 --recursive git://git.savannah.gnu.org/gnulib.git /tmp/src/gnulib
           git clone --depth 1 --recursive https://git.lysator.liu.se/nettle/nettle.git /tmp/src/--branch=nettle_3.10.1_release_20241230
-          git clone --depth 1 --recursive https://gitlab.com/gnutls/gnutls.git /tmp/src/||
+          git clone --depth 1 --recursive https://gitlab.com/gnutls/gnutls.git /tmp/src/gnutls
 
       - name: Build fuzz targets with AFL++
         run: |

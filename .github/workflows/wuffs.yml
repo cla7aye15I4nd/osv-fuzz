@@ -36,8 +36,8 @@ jobs:
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/google/wuffs.git /tmp/src/wuffs
           git clone --depth 1 --recursive https://github.com/nst/JSONTestSuite.git /tmp/src/JSONTestSuite
-          git clone --depth 1 --recursive https://github.com/libjpeg-turbo/seed-corpora /tmp/src/&&
-          git clone --depth 1 --recursive https://github.com/nigeltao/mozsec-fuzzdata /tmp/src/&&
+          git clone --depth 1 --recursive https://github.com/libjpeg-turbo/seed-corpora /tmp/src/seed-corpora
+          git clone --depth 1 --recursive https://github.com/nigeltao/mozsec-fuzzdata /tmp/src/mozsec-fuzzdata
           git clone --depth 1 --recursive https://github.com/minio/simdjson-fuzz /tmp/src/simdjson-fuzz
           git clone --depth 1 --recursive https://github.com/webmproject/libwebp-test-data.git /tmp/src/webp_corpus
           git clone --depth 1 --recursive https://github.com/nigeltao/xz-tests-files /tmp/src/xz-tests-files

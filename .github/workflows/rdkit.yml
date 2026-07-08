@@ -34,7 +34,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://gitlab.com/libeigen/eigen /tmp/src/&&
+          git clone --depth 1 --recursive https://gitlab.com/libeigen/eigen /tmp/src/eigen
           git clone --depth 1 --recursive https://github.com/rdkit/rdkit.git /tmp/tmp/src/rdkit
 
       - name: Build fuzz targets with AFL++

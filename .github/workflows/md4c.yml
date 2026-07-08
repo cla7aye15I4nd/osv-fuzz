@@ -37,7 +37,7 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/mity/md4c /tmp/src/md4c
-          git clone --depth 1 --recursive https://github.com/google/fuzzing /tmp/src/&&
+          git clone --depth 1 --recursive https://github.com/google/fuzzing /tmp/src/fuzzing
 
       - name: Build fuzz targets with AFL++
         run: |

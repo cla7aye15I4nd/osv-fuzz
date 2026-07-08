@@ -40,7 +40,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/unicode-org/text-rendering-tests.git /tmp/src/&&
+          git clone --depth 1 --recursive https://github.com/unicode-org/text-rendering-tests.git /tmp/src/text-rendering-tests
           git clone --depth 1 --recursive https://github.com/freetype/freetype2-testing.git /tmp/src/freetype2-testing
 
       - name: Download fuzzer files from oss-fuzz

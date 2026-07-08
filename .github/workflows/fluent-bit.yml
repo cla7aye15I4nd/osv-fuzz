@@ -42,7 +42,6 @@ jobs:
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/fluent/fluent-bit/ /tmp/src/fluent-bit
           git clone --depth 1 --recursive https://github.com/fluent/ctraces /tmp/src/ctraces
-          git clone --depth 1 --recursive https://github.com/fluent/cmetrics /tmp/src/cmetrics
 
       - name: Build fuzz targets with AFL++
         run: |

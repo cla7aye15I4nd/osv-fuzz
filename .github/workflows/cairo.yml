@@ -42,7 +42,7 @@ jobs:
           mkdir -p /tmp/src
           git clone --depth 1 --recursive git://git.sv.nongnu.org/freetype/freetype2.git /tmp/src/freetype2
           git clone --depth 1 --recursive https://gitlab.gnome.org/GNOME/glib /tmp/src/glib
-          git clone --depth 1 --recursive https://gitlab.freedesktop.org/cairo/cairo.git /tmp/src/&&
+          git clone --depth 1 --recursive https://gitlab.freedesktop.org/cairo/cairo.git /tmp/src/cairo
 
       - name: Download fuzzer files from oss-fuzz
         run: |

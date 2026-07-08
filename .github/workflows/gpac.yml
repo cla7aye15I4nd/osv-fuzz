@@ -37,7 +37,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/gpac/gpac /tmp/src/&&
+          git clone --depth 1 --recursive https://github.com/gpac/gpac /tmp/src/gpac
 
       - name: Build fuzz targets with AFL++
         run: |
