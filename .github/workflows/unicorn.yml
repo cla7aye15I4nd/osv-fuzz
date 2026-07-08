@@ -34,6 +34,11 @@ jobs:
             cmake \
             pkg-config
 
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 --recursive https://github.com/unicorn-engine/unicorn /tmp/src/unicorn
+
       - name: Build fuzz targets with AFL++
         run: |
           mkdir -p build/fuzz-targets /tmp/work

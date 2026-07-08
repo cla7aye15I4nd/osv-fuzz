@@ -32,9 +32,16 @@ jobs:
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
             bison \
+            cmake \
             flex \
+            libbz2-dev \
+            libjson-c-dev \
+            libpcre2-dev \
+            libssl-dev \
+            libxml2-dev \
             pkg-config \
-            python3-dev
+            python3-dev \
+            zlib1g-dev
           cargo install bindgen-cli
 
       - name: Clone source
@@ -75,26 +82,10 @@ jobs:
           rm -rf /tmp/src/build
           mkdir -p /tmp/src/build
           cd /tmp/src/build
-          export CLAMAV_DEPENDENCIES=/mussels/install
           cmake /tmp/src/clamav \
               -DENABLE_FUZZ=ON                                                   \
               -DHAVE_MMAP=OFF                                                    \
-              -DJSONC_INCLUDE_DIR="$CLAMAV_DEPENDENCIES/include/json-c"          \
-              -DJSONC_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libjson-c.a"             \
               -DENABLE_JSON_SHARED=OFF                                           \
-              -DBZIP2_INCLUDE_DIR="$CLAMAV_DEPENDENCIES/include"                 \
-              -DBZIP2_LIBRARY_RELEASE="$CLAMAV_DEPENDENCIES/lib/libbz2.a"        \
-              -DOPENSSL_ROOT_DIR="$CLAMAV_DEPENDENCIES"                          \
-              -DOPENSSL_INCLUDE_DIR="$CLAMAV_DEPENDENCIES/include"               \
-              -DOPENSSL_CRYPTO_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libcrypto.a"    \
-              -DOPENSSL_SSL_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libssl.a"          \
-              -DZLIB_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libssl.a"                 \
-              -DLIBXML2_INCLUDE_DIR="$CLAMAV_DEPENDENCIES/include/libxml2"       \
-              -DLIBXML2_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libxml2.a"             \
-              -DPCRE2_INCLUDE_DIR="$CLAMAV_DEPENDENCIES/include"                 \
-              -DPCRE2_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libpcre2-8.a"            \
-              -DZLIB_INCLUDE_DIR="$CLAMAV_DEPENDENCIES/include"                  \
-              -DZLIB_LIBRARY="$CLAMAV_DEPENDENCIES/lib/libz.a"                   \
               -DCMAKE_INSTALL_PREFIX="install"
           make -j$(nproc)
           cp ./fuzz/clamav_* $GITHUB_WORKSPACE/build/fuzz-targets/.

@@ -47,6 +47,7 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/ntop/nDPI.git /tmp/src/ndpi
+          git clone --depth 1 -b json-c-0.17-20230812 https://github.com/json-c/json-c.git /tmp/src/json-c-json-c-0.17-20230812
 
       - name: Build fuzz targets with AFL++
         run: |
