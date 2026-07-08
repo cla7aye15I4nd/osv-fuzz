@@ -81,7 +81,7 @@ jobs:
           BUILD=/tmp/work/build
           rm -rf /tmp/work/*
           rm -rf $BUILD
-          mkdir -p $BUILD
+          mkdir -p $BUILD $PREFIX
           pushd /tmp/src/glib/
           meson \
               setup \
@@ -99,7 +99,7 @@ jobs:
           ./autogen.sh
           ./configure --prefix="$PREFIX" --disable-shared PKG_CONFIG_PATH="$PKG_CONFIG_PATH"
           make -j$(nproc)
-          sudo make install
+          make install
           pushd /tmp/src/cairo
           CFLAGS="-DDEBUG_SVG_RENDER $CFLAGS" meson \
               setup \
