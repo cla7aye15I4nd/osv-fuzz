@@ -70,6 +70,10 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+          # Create stub libFuzzingEngine so meson's oss-fuzz probe passes
+          echo 'int main(){}' | $CC -x c - -c -o /tmp/work/empty.o
+          sudo ar rcs /usr/lib/libFuzzingEngine.a /tmp/work/empty.o
+          sudo ldconfig
           cd /tmp/src/glib
           set +e
           PREFIX=/tmp/work/prefix

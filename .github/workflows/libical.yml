@@ -31,6 +31,7 @@ jobs:
         run: |
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
+            libicu-dev \
             openjdk-11-jdk
 
       - name: Clone source
@@ -72,9 +73,10 @@ jobs:
           make -j$(nproc)
           sudo make install
           sudo ldconfig
-          $CXX $CXXFLAGS -std=c++11 -I/usr/local/include /tmp/src/libical_fuzzer.cc $LIB_FUZZING_ENGINE /usr/local/lib/libical.a -o $GITHUB_WORKSPACE/build/fuzz-targets/libical_fuzzer
-          $CXX $CXXFLAGS -std=c++11 -I/usr/local/include /tmp/src/libical_extended_fuzzer.cc $LIB_FUZZING_ENGINE /usr/local/lib/libical.a -o $GITHUB_WORKSPACE/build/fuzz-targets/libical_extended_fuzzer
-          $CXX $CXXFLAGS -std=c++11 -I/usr/local/include /tmp/src/libicalvcard_fuzzer.cc $LIB_FUZZING_ENGINE /usr/local/lib/libicalvcard.a /usr/local/lib/libical.a -o $GITHUB_WORKSPACE/build/fuzz-targets/libicalvcard_fuzzer
+          ICU_LIBS="$(pkg-config --libs --static icu-i18n 2>/dev/null || echo '-licui18n -licuuc -licudata')"
+          $CXX $CXXFLAGS -std=c++11 -I/usr/local/include /tmp/src/libical_fuzzer.cc $LIB_FUZZING_ENGINE /usr/local/lib/libical.a $ICU_LIBS -o $GITHUB_WORKSPACE/build/fuzz-targets/libical_fuzzer
+          $CXX $CXXFLAGS -std=c++11 -I/usr/local/include /tmp/src/libical_extended_fuzzer.cc $LIB_FUZZING_ENGINE /usr/local/lib/libical.a $ICU_LIBS -o $GITHUB_WORKSPACE/build/fuzz-targets/libical_extended_fuzzer
+          $CXX $CXXFLAGS -std=c++11 -I/usr/local/include /tmp/src/libicalvcard_fuzzer.cc $LIB_FUZZING_ENGINE /usr/local/lib/libicalvcard.a /usr/local/lib/libical.a $ICU_LIBS -o $GITHUB_WORKSPACE/build/fuzz-targets/libicalvcard_fuzzer
           find . -name *.ics -print | zip -q $GITHUB_WORKSPACE/build/fuzz-targets/libical_fuzzer_seed_corpus.zip -@
           set -e
           # Verify at least one fuzz target was built

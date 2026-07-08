@@ -44,6 +44,7 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/eclipse-mosquitto/mosquitto.git /tmp/src/mosquitto
+          git clone --depth 1 https://github.com/DaveGamble/cJSON.git /tmp/src/cJSON
           git clone --depth 1 --recursive https://github.com/google/libprotobuf-mutator.git /tmp/src/libprotobuf-mutator
 
       - name: Build fuzz targets with AFL++
