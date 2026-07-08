@@ -56,6 +56,7 @@ jobs:
           git clone --depth 1 --recursive https://github.com/rockdaboot/libpsl.git /tmp/src/libpsl
           git clone --depth 1 --recursive https://gitlab.com/gnutls/gnutls.git /tmp/src/gnutls
           git clone --depth 1 --recursive https://gitlab.com/gnuwget/wget2.git /tmp/src/wget2
+          git clone --depth 1 https://git.savannah.gnu.org/git/libunistring.git /tmp/src/libunistring
 
       - name: Build fuzz targets with AFL++
         run: |

@@ -53,9 +53,12 @@ jobs:
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://git.savannah.gnu.org/git/gnulib.git /tmp/src/gnulib
           git clone --depth 1 --recursive https://github.com/rockdaboot/libpsl.git /tmp/src/libpsl
-          git clone --depth 1 --recursive https://git.lysator.liu.se/nettle/nettle.git /tmp/src/--branch=nettle_3.10_release_20240616
+          git clone --depth 1 --branch nettle_3.10_release_20240616 https://git.lysator.liu.se/nettle/nettle.git /tmp/src/nettle
           git clone --depth 1 --recursive https://gitlab.com/gnutls/gnutls.git /tmp/src/gnutls
           git clone --depth 1 --recursive https://git.savannah.gnu.org/git/wget.git /tmp/src/wget
+          git clone --depth 1 https://git.savannah.gnu.org/git/libunistring.git /tmp/src/libunistring
+          git clone --depth 1 https://gitlab.com/libidn/libidn2.git /tmp/src/libidn2
+          git clone --depth 1 https://gmplib.org/repo/gmp.git /tmp/src/gmp || git clone --depth 1 https://github.com/alisw/GMP.git /tmp/src/gmp
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -106,7 +109,7 @@ jobs:
           cd /tmp/src/nettle
           bash .bootstrap
           ./configure --enable-static --disable-shared --disable-documentation --disable-openssl --disable-assembler --disable-fat --prefix=$WGET_DEPS_PATH
-          ( make -j$(nproc) || make -j$(nproc) ) && make install
+          ( make -j$(nproc) || make -j$(nproc) ) && sudo make install
           if test $? != 0;then
                   echo "Failed to compile nettle"
                   exit 1
