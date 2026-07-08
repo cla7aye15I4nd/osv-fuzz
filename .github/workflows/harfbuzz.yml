@@ -34,6 +34,7 @@ jobs:
             meson \
             ninja-build \
             pkg-config \
+            python3-setuptools \
             ragel
 
       - name: Clone source
@@ -71,11 +72,14 @@ jobs:
           build=/tmp/work/build
           rm -rf $build
           mkdir -p $build
-          meson --default-library=static --prefer-static --wrap-mode=nodownload \
+          meson setup \
+                -Ddefault_library=static \
+                -Dprefer_static=true \
+                -Dwrap_mode=nodownload \
                 -Dexperimental_api=true \
-                -Dfuzzer_ldflags="$(echo $LIB_FUZZING_ENGINE)" \
+                -Dfuzzer_ldflags="$LIB_FUZZING_ENGINE" \
                 $build \
-            || (cat build/meson-logs/meson-log.txt && false)
+            || (cat $build/meson-logs/meson-log.txt && false)
           ninja -v -j$(nproc) -C $build test/fuzzing/hb-{shape,raster,vector,gpu,subset,repacker}-fuzzer
           mv $build/test/fuzzing/hb-{shape,raster,vector,gpu,subset,repacker}-fuzzer $GITHUB_WORKSPACE/build/fuzz-targets/
           mkdir -p all-fonts

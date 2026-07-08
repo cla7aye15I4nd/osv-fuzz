@@ -19,7 +19,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
@@ -69,15 +69,90 @@ jobs:
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/libavif
-          set +e
-          bash tests/oss-fuzz/build.sh
-          find $GITHUB_WORKSPACE/build/fuzz-targets/
-          set -e
+
+          # Patch dav1d build for sanitizer support (from upstream build.sh)
+          DAV1D_EXTRA_FLAGS="-Db_sanitize=$SANITIZER -Db_lundef=false"
+          sed -i "s:meson setup \(.*\) dav1d/build dav1d:meson setup \1 ${DAV1D_EXTRA_FLAGS} dav1d/build dav1d:g" ./ext/dav1d.cmd
+
+          # Build all dependencies using upstream ext scripts
+          cd ext
+          bash aom.cmd
+          bash dav1d.cmd
+          bash libjpeg.cmd
+          bash libsharpyuv.cmd
+          bash libyuv.cmd
+          bash zlibpng.cmd
+          cd ..
+
+          # Build libavif as a static library (no fuzztest framework needed)
+          cmake -G Ninja -S . -B build \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DAVIF_CODEC_AOM=LOCAL \
+            -DAVIF_CODEC_DAV1D=LOCAL \
+            -DAVIF_CODEC_AOM_DECODE=ON \
+            -DAVIF_CODEC_AOM_ENCODE=ON \
+            -DAVIF_JPEG=LOCAL \
+            -DAVIF_LIBSHARPYUV=LOCAL \
+            -DAVIF_LIBYUV=LOCAL \
+            -DAVIF_ZLIBPNG=LOCAL \
+            -DAVIF_BUILD_TESTS=OFF \
+            -DAVIF_ENABLE_WERROR=OFF
+          cmake --build build --config Release --parallel
+
+          # Write standalone decode fuzzer (libavif only ships fuzztest-based
+          # targets which are incompatible with AFL++ -- they need libfuzzer
+          # engine and wrapper scripts that afl-fuzz cannot drive)
+          cat > /tmp/work/avif_decode_fuzzer.c << 'FUZZ_EOF'
+          #include <stdint.h>
+          #include <stddef.h>
+          #include "avif/avif.h"
+
+          int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+              if (size == 0) return 0;
+              avifDecoder *decoder = avifDecoderCreate();
+              if (!decoder) return 0;
+              decoder->maxThreads = 1;
+              decoder->imageSizeLimit = 512 * 512;
+              decoder->imageDimensionLimit = 512;
+              avifResult result = avifDecoderSetIOMemory(decoder, data, size);
+              if (result == AVIF_RESULT_OK) {
+                  result = avifDecoderParse(decoder);
+                  if (result == AVIF_RESULT_OK) {
+                      while (avifDecoderNextImage(decoder) == AVIF_RESULT_OK) {
+                      }
+                  }
+              }
+              avifDecoderDestroy(decoder);
+              return 0;
+          }
+          FUZZ_EOF
+
+          # Collect all static libraries from cmake build tree and ext deps
+          ALL_LIBS=$(find /tmp/src/libavif/build /tmp/src/libavif/ext \
+            -name '*.a' -type f 2>/dev/null | sort -u | tr '\n' ' ')
+          echo "[+] Static libraries: $ALL_LIBS"
+
+          # Compile and link the standalone fuzzer
+          $CXX $CXXFLAGS $LIB_FUZZING_ENGINE \
+            -I /tmp/src/libavif/include \
+            /tmp/work/avif_decode_fuzzer.c \
+            -Wl,--start-group \
+            $ALL_LIBS \
+            -Wl,--end-group \
+            -lpthread -lm -ldl \
+            -o $OUT/avif_decode_fuzzer
+
+          # Copy seed corpus alongside the fuzzer
+          if [ -f "$SRC/avif_decode_seed_corpus.zip" ]; then
+            cp "$SRC/avif_decode_seed_corpus.zip" "$OUT/avif_decode_fuzzer_seed_corpus.zip"
+          fi
+
+          find $OUT/
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
           echo "[+] Built $target_count fuzz targets"
           if [ "$target_count" -eq 0 ]; then
-            echo "[!] No fuzz targets built — build failed"
+            echo "[!] No fuzz targets built -- build failed"
             exit 1
           fi
 

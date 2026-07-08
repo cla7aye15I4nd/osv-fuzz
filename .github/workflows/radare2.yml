@@ -81,6 +81,7 @@ jobs:
           #  - Replace gcc-ar with llvm-ar (AFL++ uses LLVM toolchain)
           #  - Skip blob build (not needed for fuzzing, can fail with ASAN)
           #  - Skip static link validation tests (incompatible with ASAN + -static)
+          cp mk/afl-clang-fast.mk mk/afl-cc.mk
           sed -i 's/gcc-ar/llvm-ar/g' sys/static.sh
           sed -i 's|${MAKE} -C binr/blob|true # skip blob|' sys/static.sh
           sed -i '/echo "Using PREFIX/,$d' sys/static.sh

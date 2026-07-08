@@ -34,12 +34,15 @@ jobs:
             autoconf \
             automake \
             libtool \
+            wget \
+            unzip \
             zlib1g-dev
 
       - name: Clone source
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/AcademySoftwareFoundation/openexr /tmp/src/openexr
+          git clone --depth 1 https://github.com/AcademySoftwareFoundation/Imath.git /tmp/src/Imath
 
       - name: Download fuzzer files from oss-fuzz
         run: |
@@ -76,6 +79,10 @@ jobs:
           sudo mkdir -p /src/aflplusplus
           sudo ln -sf "$(find /usr -name 'afl-compiler-rt.o' 2>/dev/null | head -1)" /src/aflplusplus/afl-compiler-rt.o
           export BUILD_DIR=/tmp/work/_build.oss-fuzz
+          # Pre-seed cmake cache so FetchContent uses pre-cloned Imath
+          # instead of downloading during configure
+          mkdir -p $BUILD_DIR
+          echo "FETCHCONTENT_SOURCE_DIR_IMATH:PATH=/tmp/src/Imath" > $BUILD_DIR/CMakeCache.txt
           ./src/test/oss-fuzz/oss-fuzz_build.sh
           cd $BUILD_DIR
           cmake --build $BUILD_DIR --target OpenEXRTest OpenEXRCoreTest IexTest OpenEXRUtilTest -j$(nproc)

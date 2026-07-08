@@ -65,6 +65,11 @@ jobs:
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
 
+          # Create stub libFuzzingEngine so meson's oss-fuzz probe passes
+          echo 'int main(){}' | $CC -x c - -c -o /tmp/work/empty.o
+          ar rcs /usr/lib/libFuzzingEngine.a /tmp/work/empty.o
+          sudo ldconfig
+
           cd /tmp/src/systemd
 
           # Install pinned Python build requirements (meson/ninja versions)
