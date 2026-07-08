@@ -49,9 +49,16 @@ jobs:
           git clone --depth 1 --recursive https://github.com/catenacyber/quadfuzz.git /tmp/src/quadfuzz
           git clone --depth 1 --recursive https://github.com/catenacyber/fuzzpcap /tmp/src/fuzzpcap
           git clone --depth 1 --recursive https://github.com/OISF/suricata.git /tmp/src/suricata
-          git clone --depth 1 --recursive https://github.com/OISF/suricata.git /tmp/src/suricata7
+          git clone --depth 1 --recursive --branch main-7.0.x https://github.com/OISF/suricata.git /tmp/src/suricata7
           git clone --depth 1 --recursive https://github.com/OISF/libhtp.git /tmp/src/libhtp
           git clone --depth 1 --recursive https://github.com/OISF/suricata-verify /tmp/src/suricata-verify
+          # Download source tarballs expected by the oss-fuzz build script
+          cd /tmp/src
+          wget -q https://github.com/PhilipHazel/pcre2/releases/download/pcre2-10.39/pcre2-10.39.tar.gz
+          wget -q https://www.tcpdump.org/release/libpcap-1.9.1.tar.gz
+          wget -q https://github.com/akheron/jansson/releases/download/v2.14/jansson-2.14.tar.gz
+          wget -q -O lz4-1.9.2.tar.gz https://github.com/lz4/lz4/archive/v1.9.2.tar.gz
+          wget -q https://rules.emergingthreats.net/open/suricata/emerging.rules.zip
 
       - name: Build fuzz targets with AFL++
         run: |

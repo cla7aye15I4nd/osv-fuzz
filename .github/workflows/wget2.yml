@@ -106,7 +106,7 @@ jobs:
           sudo make install
           cd /tmp/src/gmp
           ./.bootstrap || autoreconf -fi
-          ./configure --enable-static --disable-shared --prefix=$WGET2_DEPS_PATH
+          ./configure --enable-static --disable-shared --disable-assembly --prefix=$WGET2_DEPS_PATH
           make -j$(nproc)
           sudo make install
           cd /tmp/src/nettle

@@ -44,6 +44,9 @@ jobs:
             python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.dict', f['name'])]" | \
             while read url; do curl -sLO --output-dir /tmp/src "$url"; done
 
+      - name: Install net-snmp build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libnl-3-dev libnl-route-3-dev
+
       - name: Build fuzz targets with AFL++
         run: |
           mkdir -p build/fuzz-targets /tmp/work

@@ -81,6 +81,10 @@ jobs:
             sudo make install
           popd
           sudo chown -R $(id -u):$(id -g) /usr/local
+          # Fix: re-chown /usr/local inside ossfuzz.sh right before libpcap's
+          # non-sudo "make install" — earlier chowns can be undone by sudo
+          # install steps that recreate dirs (e.g. /usr/local/lib/pkgconfig/).
+          sed -i '/^make install$/i sudo chown -R $(id -u):$(id -g) /usr/local 2>/dev/null || true' ./ndpi/tests/ossfuzz.sh
           bash -x ./ndpi/tests/ossfuzz.sh
           set -e
           # Verify at least one fuzz target was built

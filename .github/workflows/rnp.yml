@@ -67,9 +67,8 @@ jobs:
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src
           set +e
-          cd "/tmp/src"
-          wget -qO- https://botan.randombit.net/releases/Botan-3.4.0.tar.xz | tar xJ
-          cd Botan-3.4.0
+          git clone --depth 1 https://github.com/randombit/botan.git /tmp/src/botan
+          cd /tmp/src/botan
           BOTAN_MODULES=$(<"/tmp/src/rnp/ci/botan3-pqc-modules" tr '\n' ',')
           ./configure.py --prefix=/usr --cc-bin="$CXX" --cc-abi-flags="$CXXFLAGS" \
                          --unsafe-fuzzer-mode \
@@ -79,6 +78,7 @@ jobs:
                          --enable-modules="$BOTAN_MODULES"
           make "-j$(nproc)"
           sudo make install
+          sudo ldconfig
           cd "/tmp/src"
           mkdir fuzzing_corpus
           cd "/tmp/src/rnp/src/tests/data"

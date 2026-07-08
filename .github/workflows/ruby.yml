@@ -44,7 +44,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/ruby/ruby /tmp/tmp/src/ruby
+          git clone --depth 1 --recursive https://github.com/ruby/ruby /tmp/src/ruby
 
       - name: Download fuzzer files from oss-fuzz
         run: |

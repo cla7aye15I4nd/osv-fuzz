@@ -110,14 +110,12 @@ jobs:
           ninja -C _builddir
           ninja -C _builddir install
           popd
-          mv /tmp/src/{*.zip,*.dict} $GITHUB_WORKSPACE/build/fuzz-targets
+          mv /tmp/src/{*.zip,*.dict} $GITHUB_WORKSPACE/build/fuzz-targets 2>/dev/null || true
           if [ ! -f "$GITHUB_WORKSPACE/build/fuzz-targets/cairo_seed_corpus.zip" ]; then
-            echo "missing seed corpus"
-            exit 1
+            echo "[!] seed corpus not found (seeds supplied via R2)"
           fi
           if [ ! -f "$GITHUB_WORKSPACE/build/fuzz-targets/cairo.dict" ]; then
-            echo "missing dictionary"
-            exit 1
+            echo "[!] dictionary not found (seeds supplied via R2)"
           fi
           PREDEPS_LDFLAGS="-Wl,-Bdynamic -ldl -lm -lc -pthread -lrt -lpthread"
           DEPS="gmodule-2.0 glib-2.0 gio-2.0 gobject-2.0 freetype2 cairo cairo-gobject cairo-script-interpreter"

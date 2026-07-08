@@ -77,26 +77,26 @@ jobs:
           # Create FuzzingEngine library expected by h2o cmake when OSS_FUZZ=ON
           # (in the oss-fuzz Docker, this is provided by the build infrastructure)
           cat > /tmp/afl_driver.c << 'DRIVER_EOF'
-#include <stdint.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <unistd.h>
-extern int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
-__attribute__((weak)) int LLVMFuzzerInitialize(int *argc, char ***argv) { return 0; }
-int main(int argc, char **argv) {
-    LLVMFuzzerInitialize(&argc, &argv);
-    unsigned char buf[1024*1024];
-    ssize_t n;
-    if (argc > 1) {
-        FILE *f = fopen(argv[1], "rb");
-        if (f) { n = fread(buf, 1, sizeof(buf), f); fclose(f);
-            if (n > 0) LLVMFuzzerTestOneInput(buf, (size_t)n); return 0; }
-    }
-    n = read(0, buf, sizeof(buf));
-    if (n > 0) LLVMFuzzerTestOneInput(buf, (size_t)n);
-    return 0;
-}
-DRIVER_EOF
+          #include <stdint.h>
+          #include <stdlib.h>
+          #include <stdio.h>
+          #include <unistd.h>
+          extern int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
+          __attribute__((weak)) int LLVMFuzzerInitialize(int *argc, char ***argv) { return 0; }
+          int main(int argc, char **argv) {
+              LLVMFuzzerInitialize(&argc, &argv);
+              unsigned char buf[1024*1024];
+              ssize_t n;
+              if (argc > 1) {
+                  FILE *f = fopen(argv[1], "rb");
+                  if (f) { n = fread(buf, 1, sizeof(buf), f); fclose(f);
+                      if (n > 0) LLVMFuzzerTestOneInput(buf, (size_t)n); return 0; }
+              }
+              n = read(0, buf, sizeof(buf));
+              if (n > 0) LLVMFuzzerTestOneInput(buf, (size_t)n);
+              return 0;
+          }
+          DRIVER_EOF
           afl-cc -c /tmp/afl_driver.c -o /tmp/afl_driver.o
           ar rcs /usr/local/lib/libFuzzingEngine.a /tmp/afl_driver.o
           pushd /tmp/src/h2o

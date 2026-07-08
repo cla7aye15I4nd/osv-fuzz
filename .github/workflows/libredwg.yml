@@ -67,21 +67,26 @@ jobs:
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/libredwg
-          set +e
           if [[ "$SANITIZER" == introspector ]]; then
             export CFLAGS="${CFLAGS} -Wno-error"
             export CXXFLAGS="${CXXFLAGS} -Wno-error"
           else
-            export CFLAGS="${CFLAGS} -Wno-error -Wno-default-const-init-field-unsafe -Wno-uninitialized-const-pointer"
-            export CXXFLAGS="${CXXFLAGS} -Wno-error -Wno-default-const-init-field-unsafe -Wno-uninitialized-const-pointer"
+            export CFLAGS="${CFLAGS} -Wno-error -Wno-unknown-warning-option -Wno-default-const-init-field-unsafe -Wno-uninitialized-const-pointer"
+            export CXXFLAGS="${CXXFLAGS} -Wno-error -Wno-unknown-warning-option -Wno-default-const-init-field-unsafe -Wno-uninitialized-const-pointer"
           fi
           sh ./autogen.sh
-          AFL_QUIET=1 ./configure --disable-shared --disable-bindings --enable-release --disable-werror
-          make -j$(nproc)
-          $CC $CFLAGS src/.libs/libredwg.a -I./include -I./src -c examples/llvmfuzz.c
+          AFL_QUIET=1 ./configure --enable-static --disable-shared --disable-bindings --enable-release --disable-werror
+          AFL_QUIET=1 make -j$(nproc)
+          if [ ! -f src/.libs/libredwg.a ]; then
+            echo "[!] make did not produce src/.libs/libredwg.a — listing available libraries:"
+            find src -name '*.a' -o -name '*.la' 2>/dev/null || true
+            exit 1
+          fi
+          $CC $CFLAGS -I./include -I./src -c examples/llvmfuzz.c -o llvmfuzz.o
           $CXX $CXXFLAGS $LIB_FUZZING_ENGINE llvmfuzz.o src/.libs/libredwg.a \
             -o $GITHUB_WORKSPACE/build/fuzz-targets/llvmfuzz
           cp /tmp/src/llvmfuzz.options $GITHUB_WORKSPACE/build/fuzz-targets/llvmfuzz.options
+          set +e
           make check-prep -C test/unit-testing/ -j$(nproc)
           set -e
           # Verify at least one fuzz target was built

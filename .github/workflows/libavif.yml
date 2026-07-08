@@ -134,7 +134,7 @@ jobs:
           echo "[+] Static libraries: $ALL_LIBS"
 
           # Compile and link the standalone fuzzer
-          $CXX $CXXFLAGS $LIB_FUZZING_ENGINE \
+          $CC $CFLAGS $LIB_FUZZING_ENGINE \
             -I /tmp/src/libavif/include \
             /tmp/work/avif_decode_fuzzer.c \
             -Wl,--start-group \

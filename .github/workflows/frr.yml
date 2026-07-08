@@ -46,6 +46,7 @@ jobs:
             libsnmp-dev \
             libsystemd-dev \
             libtool \
+            patchelf \
             pkg-config \
             protobuf-c-compiler \
             python3-dev \
@@ -56,6 +57,7 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/FRRouting/frr /tmp/src/frr
+          git clone --depth 1 --recursive https://github.com/CESNET/libyang /tmp/src/libyang
           git clone --depth 1 --recursive https://github.com/qlyoung/corpi /tmp/src/corpi
           git clone --depth 1 --recursive https://github.com/pytest-dev/pytest /tmp/src/pytest
 
@@ -94,10 +96,11 @@ jobs:
           (
           cd /tmp/src/libyang
           mkdir build; cd build
-          cmake -DBUILD_SHARED_LIBS=OFF -DENABLE_LYD_PRIV=ON -DCMAKE_INSTALL_PREFIX:PATH=/usr \
+          cmake -DBUILD_SHARED_LIBS=ON -DENABLE_LYD_PRIV=ON -DCMAKE_INSTALL_PREFIX:PATH=/usr \
               -D CMAKE_BUILD_TYPE:String="Release" ..
           make -j$(nproc)
           sudo make install
+          sudo ldconfig
           )
           export ASAN_OPTIONS=detect_leaks=0
           export CFLAGS="${CFLAGS} -DFUZZING_OVERRIDE_LLVMFuzzerTestOneInput"

@@ -52,60 +52,86 @@ jobs:
 
       - name: Build fuzz targets with AFL++
         run: |
-          mkdir -p build/fuzz-targets /tmp/work
+          mkdir -p build/fuzz-targets
           export CC=afl-cc
           export CXX=afl-c++
           export CFLAGS="${CFLAGS:-} -fsanitize=address"
           export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
-          export FUZZING_ENGINE=afl
-          export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
-          export SANITIZER=address
-          export ARCHITECTURE=x86_64
+          export CCACHE_DISABLE=1
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
-          export WORK=/tmp/work
-          # Take ownership of /usr/local for install commands (Docker runs as root)
-          sudo chown -R $(id -u):$(id -g) /usr/local 2>/dev/null || true
-          # Allow ldconfig to update cache
-          sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
-          sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
-          echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+
           cd /tmp/src/radare2
-          set +e
-          export USERCC=$CC
-          export HOST_CC=$CC
-          export NOLTO=1
-          # Disable ccache — it wraps afl-cc and breaks AFL++ instrumentation
-          export CCACHE_DISABLE=1
-          # Patch sys/static.sh for CI environment:
-          #  - Replace gcc-ar with llvm-ar (AFL++ uses LLVM toolchain)
-          #  - Skip blob build (not needed for fuzzing, can fail with ASAN)
-          #  - Skip static link validation tests (incompatible with ASAN + -static)
-          cp mk/afl-clang-fast.mk mk/afl-cc.mk
-          sed -i 's/gcc-ar/llvm-ar/g' sys/static.sh
-          sed -i 's|${MAKE} -C binr/blob|true # skip blob|' sys/static.sh
-          sed -i '/echo "Using PREFIX/,$d' sys/static.sh
-          echo 'exit 0' >> sys/static.sh
-          sys/static.sh || true
-          cp -r r2-static $GITHUB_WORKSPACE/build/fuzz-targets/
-          cp -r ../radare2-fuzz/targets .
-          export RADARE2_STATIC_BUILD=$GITHUB_WORKSPACE/build/fuzz-targets/r2-static
-          export CXXFLAGS="${CXXFLAGS} -I ${RADARE2_STATIC_BUILD}/usr/include/libr/sdb"
-          cd targets 
-          make
-          for target in $(ls *.cc); do
-          	fuzzer=$(echo $target | cut -d'.' -f1)
-          	cp $fuzzer $GITHUB_WORKSPACE/build/fuzz-targets
-          	cp /tmp/src/default.options $GITHUB_WORKSPACE/build/fuzz-targets/$fuzzer.options
+
+          # Build radare2 with meson using static libraries and built-in fuzz targets.
+          # The enable_libfuzzer option builds ~20 fuzz targets in test/fuzz/.
+          # With CC=afl-cc, the -fsanitize=fuzzer flag in each target's build rule
+          # is handled by AFL++'s runtime (afl-cc intercepts it).
+          meson setup builddir \
+            --default-library=static \
+            --prefix=/usr \
+            --libdir=lib \
+            --buildtype=debugoptimized \
+            -Denable_tests=false \
+            -Denable_r2r=false \
+            -Denable_libfuzzer=true \
+            -Dcli=disabled
+
+          ninja -C builddir -j$(nproc)
+
+          # Copy built-in fuzz targets to output
+          for target in builddir/test/fuzz/fuzz_*; do
+            [ -f "$target" ] && [ -x "$target" ] || continue
+            bname=$(basename "$target")
+            cp "$target" "$OUT/"
+            [ -f "$SRC/default.options" ] && cp "$SRC/default.options" "$OUT/$bname.options"
+            echo "[+] Built: $bname"
           done
-          for seed in $(ls corpora); do
-          	zip -j corpora/$seed.zip corpora/$seed/*
-          	cp corpora/$seed.zip $GITHUB_WORKSPACE/build/fuzz-targets
-          done
-          set -e
+
+          # Also attempt to build the external ia_fuzz from radare2-fuzz.
+          # Install the meson build to create combined libr.a for external targets.
+          R2_STATIC=$(pwd)/r2-static
+          mkdir -p "$R2_STATIC/usr"
+          DESTDIR="$R2_STATIC" ninja -C builddir install 2>/dev/null || true
+
+          # Combine individual static libraries into a single libr.a
+          if [ -d "$R2_STATIC/usr/lib" ]; then
+            echo "CREATE /tmp/libr-combined.a" > /tmp/merge.mri
+            find "$R2_STATIC/usr/lib" -name '*.a' | sort | while read lib; do
+              echo "ADDLIB $lib" >> /tmp/merge.mri
+            done
+            echo "SAVE" >> /tmp/merge.mri
+            echo "END" >> /tmp/merge.mri
+            if ar -M < /tmp/merge.mri 2>/dev/null; then
+              mv /tmp/libr-combined.a "$R2_STATIC/usr/lib/libr.a"
+              export RADARE2_STATIC_BUILD="$R2_STATIC"
+              export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
+              export CXXFLAGS="${CXXFLAGS} -I ${RADARE2_STATIC_BUILD}/usr/include/libr/sdb"
+              cp -r "$SRC/radare2-fuzz/targets" .
+              cd targets
+              if make 2>&1; then
+                for target_src in *.cc; do
+                  fuzzer=$(echo "$target_src" | cut -d'.' -f1)
+                  [ -f "$fuzzer" ] && cp "$fuzzer" "$OUT/" && echo "[+] Built external: $fuzzer"
+                  [ -f "$SRC/default.options" ] && cp "$SRC/default.options" "$OUT/$fuzzer.options"
+                done
+              else
+                echo "[!] External ia_fuzz build failed (non-fatal, built-in targets available)"
+              fi
+              # Package seed corpora from radare2-fuzz
+              for seed_dir in corpora/*/; do
+                [ -d "$seed_dir" ] || continue
+                seed=$(basename "$seed_dir")
+                zip -j "corpora/$seed.zip" "$seed_dir"* 2>/dev/null && cp "corpora/$seed.zip" "$OUT/"
+              done
+              cd ..
+            fi
+          fi
+
           # Verify at least one fuzz target was built
-          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
-          echo "[+] Built $target_count fuzz targets"
+          target_count=$(find "$OUT" -maxdepth 1 -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets:"
+          find "$OUT" -maxdepth 1 -type f -executable -exec basename {} \; | sort
           if [ "$target_count" -eq 0 ]; then
             echo "[!] No fuzz targets built — build failed"
             exit 1
