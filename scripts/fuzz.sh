@@ -10,18 +10,27 @@ FUZZ_DURATION="${FUZZ_DURATION:-1800}"
 mkdir -p "$FUZZ_RESULTS_DIR"
 
 new_crashes=0
+targets_attempted=0
+targets_succeeded=0
 
 for binary in "$FUZZ_DIR"/*; do
     [ -f "$binary" ] && [ -x "$binary" ] || continue
 
     bname=$(basename "$binary")
     case "$bname" in
-        *.dict|*.options|*.labels|*.cfg|*.txt|*.sh|*.py|*.zip|*.json) continue ;;
+        *.dict|*.options|*.labels|*.cfg|*.txt|*.sh|*.py|*.zip|*.json|*.a|*.o|*.so|*.cnf|*.pem|*.der) continue ;;
         afl-*|llvm-symbolizer) continue ;;
     esac
 
+    # Skip if the binary is not AFL-instrumented (quick check)
+    if ! AFL_NO_UI=1 AFL_SKIP_CPUFREQ=1 timeout 5 afl-showmap -m none -o /dev/null -- "$binary" /dev/null > /dev/null 2>&1; then
+        echo "  [!] SKIP $bname — not AFL-instrumented or crashes on startup"
+        continue
+    fi
+
     input_dir="$FUZZ_RESULTS_DIR/${bname}_input"
     output_dir="$FUZZ_RESULTS_DIR/${bname}_output"
+    afl_log="$FUZZ_RESULTS_DIR/${bname}_afl.log"
     mkdir -p "$input_dir" "$output_dir"
 
     # Use seeds that did NOT crash in dry run as corpus
@@ -38,23 +47,35 @@ for binary in "$FUZZ_DIR"/*; do
     done
 
     if [ "$seed_count" -eq 0 ]; then
-        # If all seeds crash, still try fuzzing with a minimal corpus
         echo "min" > "$input_dir/minimal_seed"
         seed_count=1
     fi
 
     echo "[*] Fuzzing $bname with $seed_count seeds for ${FUZZ_DURATION}s..."
+    targets_attempted=$((targets_attempted + 1))
 
-    # Try afl-fuzz first
     set +e
+    start_time=$(date +%s)
     AFL_SKIP_CPUFREQ=1 \
     AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
     AFL_NO_UI=1 \
     timeout "$FUZZ_DURATION" \
         afl-fuzz -i "$input_dir" -o "$output_dir" -m none -- "$binary" @@ \
-        > /dev/null 2>&1
+        > "$afl_log" 2>&1
     fuzz_exit=$?
+    end_time=$(date +%s)
+    elapsed=$((end_time - start_time))
     set -e
+
+    if [ "$elapsed" -lt 30 ] && [ "$fuzz_exit" -ne 124 ]; then
+        echo "  [!] WARN: $bname exited after ${elapsed}s (expected ${FUZZ_DURATION}s)"
+        echo "  [!] afl-fuzz exit code: $fuzz_exit"
+        # Show last 20 lines of afl-fuzz output for debugging
+        tail -20 "$afl_log" 2>/dev/null | sed 's/^/  [afl] /'
+    else
+        targets_succeeded=$((targets_succeeded + 1))
+        echo "  [+] $bname fuzzed for ${elapsed}s (exit: $fuzz_exit)"
+    fi
 
     # Check for crashes
     crash_dir="$output_dir/default/crashes"
@@ -72,7 +93,6 @@ for binary in "$FUZZ_DIR"/*; do
 
             if [ $replay_exit -ne 0 ] && [ $replay_exit -ne 124 ]; then
                 echo "  [!] NEW CRASH: $bname from fuzzing"
-                # Also save the crashing input
                 cp "$crash_file" "$FUZZ_RESULTS_DIR/${bname}_fuzz_${crash_name}.bin"
                 echo "$crash_name" > "$FUZZ_RESULTS_DIR/${bname}_fuzz_${crash_name}.bin.orig_name"
                 new_crashes=$((new_crashes + 1))
@@ -93,17 +113,20 @@ for binary in "$FUZZ_DIR"/*; do
         done
     fi
 
-    # Cleanup large fuzzing output to save space
+    # Cleanup large fuzzing output to save space, keep the log
     rm -rf "$input_dir" "$output_dir"
 done
 
 echo ""
 echo "[+] Fuzzing complete: $new_crashes new crashes found"
+echo "[+] Targets: $targets_succeeded/$targets_attempted fuzzed successfully"
 
 python3 -c "
 import json
 print(json.dumps({
     'new_crashes': $new_crashes,
     'fuzz_duration': $FUZZ_DURATION,
+    'targets_attempted': $targets_attempted,
+    'targets_succeeded': $targets_succeeded,
 }))
 " > "$FUZZ_RESULTS_DIR/summary.json"
