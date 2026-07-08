@@ -37,6 +37,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
+          git clone --depth 1 --recursive https://github.com/Mbed-TLS/mbedtls.git /tmp/src/mbedtls
           git clone --depth 1 --recursive https://github.com/google/boringssl.git /tmp/src/boringssl
           git clone --depth 1 --recursive https://github.com/openssl/openssl.git /tmp/src/openssl
 

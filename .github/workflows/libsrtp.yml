@@ -66,6 +66,7 @@ jobs:
           cd /tmp/src
           set +e
           cd /tmp/src/libsrtp
+          cp /usr/share/automake-*/ar-lib . 2>/dev/null || true
           autoreconf -ivf
           ./configure --with-crypto-library=internal
           LIBFUZZER="$LIB_FUZZING_ENGINE" make srtp-fuzzer

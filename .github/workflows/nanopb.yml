@@ -34,7 +34,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/nanopb/nanopb /tmp/tmp/src/nanopb
+          git clone --depth 1 --recursive https://github.com/nanopb/nanopb /tmp/src/nanopb
 
       - name: Build fuzz targets with AFL++
         run: |

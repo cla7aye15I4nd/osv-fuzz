@@ -33,10 +33,11 @@ jobs:
           sudo apt-get install -y -qq \
             autoconf \
             automake \
+            libffi-dev \
             libtool \
-            meson \
             ninja-build \
             pkg-config
+          pip3 install meson
 
       - name: Clone source
         run: |
@@ -76,25 +77,25 @@ jobs:
           export PKG_CONFIG="`which pkg-config` --static"
           export PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig
           export PATH=$PREFIX/bin:$PATH
-          BUILD=/tmp/work/build
           rm -rf /tmp/work/*
-          rm -rf $BUILD
-          mkdir -p $BUILD
+          mkdir -p $PREFIX
           pushd /tmp/src/zlib
           patch -p1 < /tmp/src/0001-deflate-Zero-initialise-the-prev-and-window-buffers.patch
           mkdir build && cd build
           CFLAGS=-fPIC ../configure --static --prefix=$PREFIX
-          sudo make install -j$(nproc)
+          make install -j$(nproc)
           popd
-          meson $BUILD \
-            -Doss_fuzz=enabled \
-            -Db_lundef=false \
+          meson \
+            setup \
             --prefix=$PREFIX \
             --libdir=lib \
-            -Ddefault_library=static \
-            -Dlibmount=disabled
-          ninja -C $BUILD
-          find $BUILD/fuzzing -maxdepth 1 -executable -type f -exec cp "{}" $GITHUB_WORKSPACE/build/fuzz-targets \;
+            --default-library=static \
+            -Db_lundef=false \
+            -Doss_fuzz=enabled \
+            -Dlibmount=disabled \
+            _builddir
+          ninja -C _builddir
+          find _builddir/fuzzing -maxdepth 1 -executable -type f -exec cp "{}" $GITHUB_WORKSPACE/build/fuzz-targets \;
           find fuzzing -type f -name "*.dict" -exec cp "{}" $GITHUB_WORKSPACE/build/fuzz-targets \;
           for CORPUS in $(find fuzzing -type f -name "*.corpus"); do
             BASENAME=${CORPUS##*/}
