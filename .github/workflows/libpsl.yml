@@ -177,13 +177,19 @@ jobs:
   test:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
 
       - name: Download seeds from R2
         run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find seeds/${{ env.PROJECT }}/ -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la seeds/${{ env.PROJECT }}/ 2>/dev/null | head -20
 
       - name: Install AFL++
         run: bash scripts/setup_aflpp.sh
