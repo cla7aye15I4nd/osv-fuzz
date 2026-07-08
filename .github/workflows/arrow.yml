@@ -38,7 +38,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/apache/arrow.git /tmp/tmp/src/arrow
+          git clone --depth 1 --recursive https://github.com/apache/arrow.git /tmp/src/arrow
 
       - name: Download fuzzer files from oss-fuzz
         run: |
@@ -118,7 +118,7 @@ jobs:
               -DARROW_USE_ASAN=off \
               -DARROW_USE_UBSAN=off \
               -DARROW_USE_TSAN=off \
-              -DARROW_FUZZING=on \
+              -DARROW_FUZZING=on
           cmake --build . -j$(nproc)
           ${ARROW}/build-support/fuzzing/generate_corpuses.sh ${BUILD_DIR}/release
           find . -executable -name "*-fuzz" -exec cp -a -v '{}' $GITHUB_WORKSPACE/build/fuzz-targets \;

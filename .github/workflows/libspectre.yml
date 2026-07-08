@@ -62,6 +62,7 @@ jobs:
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/libspectre/
           set +e
+          sed -i '/^\s*zip /s/$/ || true/' /tmp/src/libspectre/test/ossfuzz.sh
           /tmp/src/libspectre/test/ossfuzz.sh
           set -e
           # Verify at least one fuzz target was built

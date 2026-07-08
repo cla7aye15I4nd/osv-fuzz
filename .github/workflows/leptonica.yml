@@ -45,7 +45,7 @@ jobs:
           git clone --depth 1 --recursive https://gitlab.com/libtiff/libtiff /tmp/src/libtiff
           git clone --depth 1 --recursive https://github.com/glennrp/libpng.git /tmp/src/libpng
           git clone --depth 1 --recursive https://chromium.googlesource.com/webm/libwebp /tmp/src/libwebp
-          git clone --depth 1 --recursive https://www.cl.cam.ac.uk/~mgk25/git/jbigkit /tmp/src/jbigkit
+          git clone --recursive https://www.cl.cam.ac.uk/~mgk25/git/jbigkit /tmp/src/jbigkit
           git clone --depth 1 --recursive https://github.com/libjpeg-turbo/libjpeg-turbo /tmp/src/libjpeg-turbo
           git clone --depth 1 --recursive https://github.com/facebook/zstd /tmp/src/zstd
 
