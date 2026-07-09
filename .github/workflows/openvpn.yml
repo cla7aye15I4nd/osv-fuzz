@@ -55,16 +55,16 @@ jobs:
           # Pattern: fuzz*.cpp — download matching files via GitHub API
           curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/openvpn" | \
             python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'fuzz.*\\.cpp', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -O --output-dir /tmp/src "$url"; done
+            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
           # Pattern: fuzz*.c — download matching files via GitHub API
           curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/openvpn" | \
             python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'fuzz.*\\.c', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -O --output-dir /tmp/src "$url"; done
+            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
           # Pattern: fuzz*.h — download matching files via GitHub API
           curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/openvpn" | \
             python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'fuzz.*\\.h', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -O --output-dir /tmp/src "$url"; done
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/crypto_patch.txt "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/crypto_patch.txt"
+            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/crypto_patch.txt "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/crypto_patch.txt"
 
       - name: Build fuzz targets with AFL++
         run: |

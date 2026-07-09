@@ -45,11 +45,11 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/parse_packet_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/unbound/parse_packet_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/fuzz_1.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/unbound/fuzz_1.c"
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/fuzz_2.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/unbound/fuzz_2.c"
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/fuzz_3.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/unbound/fuzz_3.c"
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/fuzz_4.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/unbound/fuzz_4.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/parse_packet_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/unbound/parse_packet_fuzzer.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_1.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/unbound/fuzz_1.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_2.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/unbound/fuzz_2.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_3.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/unbound/fuzz_3.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_4.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/unbound/fuzz_4.c"
 
       - name: Build fuzz targets with AFL++
         run: |
