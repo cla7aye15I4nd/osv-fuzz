@@ -47,13 +47,13 @@ jobs:
         run: |
           mkdir -p /tmp/src
           # Pattern: *.cc — download matching files via GitHub API
-          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/mupdf" | \
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/mupdf" | \
             python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.cc', f['name'])]" | \
-            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+            while read url; do curl -sL -H "Authorization: token $GITHUB_TOKEN" -O --output-dir /tmp/src "$url"; done
           # Pattern: *.options — download matching files via GitHub API
-          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/mupdf" | \
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/mupdf" | \
             python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.options', f['name'])]" | \
-            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+            while read url; do curl -sL -H "Authorization: token $GITHUB_TOKEN" -O --output-dir /tmp/src "$url"; done
           # Download PDF dictionary (matches oss-fuzz Dockerfile ADD)
           curl -sL -o /tmp/src/pdf_fuzzer.dict \
             https://raw.githubusercontent.com/rc0r/afl-fuzz/master/dictionaries/pdf.dict

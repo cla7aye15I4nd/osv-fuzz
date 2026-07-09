@@ -47,7 +47,7 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src/upx/fuzzers
-          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/upx/fuzzers" | \
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/upx/fuzzers" | \
             python3 -c "import json,sys; files=json.load(sys.stdin); [print(f['download_url']) for f in files if f['type']=='file']" | \
             while read url; do curl -sLO --output-dir /tmp/src/upx/fuzzers "$url"; done
 
