@@ -73,8 +73,10 @@ jobs:
           printf '#!/bin/sh\nexec sudo /sbin/ldconfig "$@"\n' | sudo tee /usr/local/bin/ldconfig > /dev/null
           sudo chmod +x /usr/local/bin/ldconfig
           cd /tmp/src
-          # Remove static libm/libc to avoid _dl_x86_cpu_features IFUNC errors on glibc 2.39
+          # Replace static libm with empty stub to avoid IFUNC errors on glibc 2.39
+          # while keeping -lm linkable (dynamic libm.so is used at runtime)
           sudo rm -f /usr/lib/x86_64-linux-gnu/libm.a /usr/lib/x86_64-linux-gnu/libm-2.39.a
+          echo '!<arch>' | sudo tee /usr/lib/x86_64-linux-gnu/libm.a > /dev/null
           set +e
           /tmp/src/tesseract/unittest/fuzzers/oss-fuzz-build.sh
           set -e
