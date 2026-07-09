@@ -57,6 +57,8 @@ jobs:
           git fetch --tags
           git submodule update --init --recursive --depth 1 || true
           # Create an annotated tag at HEAD so git describe works in shallow clone
+          git config user.email "ci@osv-fuzz"
+          git config user.name "osv-fuzz"
           git tag -a -f -m "fuzz build" v99.0.0-fuzz HEAD
           cd -
           rm -rf /tmp/src/tarantool/test/static 2>/dev/null || true
