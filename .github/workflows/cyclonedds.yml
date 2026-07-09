@@ -83,7 +83,7 @@ jobs:
           # Allow pip3 install without venv on Ubuntu 24.04
           export PIP_BREAK_SYSTEM_PACKAGES=1
           # fuzz_type_graph requires protobuf + libprotobuf-mutator (not available on GH Actions)
-          rm -rf fuzz/fuzz_type_graph
+          sed -i '/fuzz_type_graph/d' fuzz/CMakeLists.txt
           bash -x fuzz/oss-fuzz-build.sh
           set -e
           # Verify at least one fuzz target was built
