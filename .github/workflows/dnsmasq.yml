@@ -55,7 +55,7 @@ jobs:
           curl -sL -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/dnsmasq" | \
             python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'fuzz.*\\.h', f['name'])]" | \
             while read url; do curl -sL -H "Authorization: token $GITHUB_TOKEN" -O --output-dir /tmp/src "$url"; done
-          curl -sL -o /tmp/src/fuzz_patch.patch "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dnsmasq/fuzz_patch.patch"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/fuzz_patch.patch "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dnsmasq/fuzz_patch.patch"
 
       - name: Build fuzz targets with AFL++
         run: |

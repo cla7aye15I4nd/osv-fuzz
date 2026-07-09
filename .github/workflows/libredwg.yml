@@ -44,7 +44,7 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sL -o /tmp/src/llvmfuzz.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libredwg/llvmfuzz.options"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/llvmfuzz.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libredwg/llvmfuzz.options"
 
       - name: Build fuzz targets with AFL++
         run: |

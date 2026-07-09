@@ -60,7 +60,7 @@ jobs:
           curl -sL -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/vulkan-loader" | \
             python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.sh', f['name'])]" | \
             while read url; do curl -sL -H "Authorization: token $GITHUB_TOKEN" -O --output-dir /tmp/src "$url"; done
-          curl -sL -o /tmp/src/vulkan-keywords.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/vulkan-loader/vulkan-keywords.dict"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/vulkan-keywords.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/vulkan-loader/vulkan-keywords.dict"
           # Pattern: *.diff — download matching files via GitHub API
           curl -sL -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/vulkan-loader" | \
             python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.diff', f['name'])]" | \

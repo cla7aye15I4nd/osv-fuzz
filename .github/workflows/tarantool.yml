@@ -65,7 +65,7 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sL -o /tmp/src/compile_lua_fuzzer "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tarantool/compile_lua_fuzzer"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/compile_lua_fuzzer "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tarantool/compile_lua_fuzzer"
 
       - name: Build fuzz targets with AFL++
         run: |

@@ -48,7 +48,7 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sL -o /tmp/src/linux32.meson "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dav1d/linux32.meson"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/linux32.meson "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dav1d/linux32.meson"
 
       - name: Build fuzz targets with AFL++
         run: |

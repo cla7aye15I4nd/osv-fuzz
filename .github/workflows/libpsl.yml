@@ -56,8 +56,8 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sL -o /tmp/src/config.site "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libpsl/config.site"
-          curl -sL -o /tmp/src/md5sum "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libpsl/md5sum"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/config.site "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libpsl/config.site"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/md5sum "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libpsl/md5sum"
 
       - name: Build fuzz targets with AFL++
         run: |

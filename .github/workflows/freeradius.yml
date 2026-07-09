@@ -47,7 +47,7 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sL -o /tmp/src/generate_seeds.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/freeradius/generate_seeds.py"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/generate_seeds.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/freeradius/generate_seeds.py"
 
       - name: Build fuzz targets with AFL++
         run: |

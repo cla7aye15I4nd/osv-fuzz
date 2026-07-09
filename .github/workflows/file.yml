@@ -48,10 +48,10 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sL -o /tmp/src/fuzzer_temp_file.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/fuzzer_temp_file.h"
-          curl -sL -o /tmp/src/magic_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/magic_fuzzer.cc"
-          curl -sL -o /tmp/src/magic_fuzzer_loaddb.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/magic_fuzzer_loaddb.cc"
-          curl -sL -o /tmp/src/magic_fuzzer_fd.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/magic_fuzzer_fd.cc"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/fuzzer_temp_file.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/fuzzer_temp_file.h"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/magic_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/magic_fuzzer.cc"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/magic_fuzzer_loaddb.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/magic_fuzzer_loaddb.cc"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/magic_fuzzer_fd.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/magic_fuzzer_fd.cc"
 
       - name: Build fuzz targets with AFL++
         run: |

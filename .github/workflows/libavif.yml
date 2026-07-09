@@ -46,7 +46,7 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sL -o /tmp/src/avif_decode_seed_corpus.zip "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libavif/avif_decode_seed_corpus.zip"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/avif_decode_seed_corpus.zip "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libavif/avif_decode_seed_corpus.zip"
 
       - name: Build fuzz targets with AFL++
         run: |

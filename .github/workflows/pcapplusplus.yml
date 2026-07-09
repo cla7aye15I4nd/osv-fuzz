@@ -50,7 +50,7 @@ jobs:
           curl -sL -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/pcapplusplus" | \
             python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.sh', f['name'])]" | \
             while read url; do curl -sL -H "Authorization: token $GITHUB_TOKEN" -O --output-dir /tmp/src "$url"; done
-          curl -sL -o /tmp/src/pcapplusplus_enable_tests.diff "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/pcapplusplus/pcapplusplus_enable_tests.diff"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/pcapplusplus_enable_tests.diff "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/pcapplusplus/pcapplusplus_enable_tests.diff"
 
       - name: Build fuzz targets with AFL++
         run: |

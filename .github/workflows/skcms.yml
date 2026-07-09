@@ -39,8 +39,8 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sL -o /tmp/src/iccprofile.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/skcms/iccprofile.options"
-          curl -sL -o /tmp/src/iccprofile.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/skcms/iccprofile.dict"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/iccprofile.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/skcms/iccprofile.options"
+          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/iccprofile.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/skcms/iccprofile.dict"
 
       - name: Build fuzz targets with AFL++
         run: |
