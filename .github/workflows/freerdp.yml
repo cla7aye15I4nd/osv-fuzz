@@ -36,6 +36,8 @@ jobs:
             devscripts \
             equivs \
             git-core \
+            libavcodec-dev \
+            libavutil-dev \
             libcjson-dev \
             libjpeg-dev \
             libkrb5-dev \
@@ -43,6 +45,7 @@ jobs:
             libpcsclite-dev \
             libpng-dev \
             libssl-dev \
+            libswresample-dev \
             liburiparser-dev \
             libwayland-dev \
             libwebp-dev \

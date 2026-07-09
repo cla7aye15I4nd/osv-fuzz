@@ -71,6 +71,8 @@ jobs:
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/freeradius-server
           set +e
+          # Prevent ASAN from failing configure's test programs
+          export ASAN_OPTIONS=detect_leaks=0
           # Normalize source-tree timestamps to avoid clock-skew build loops
           find . -exec touch {} +
           # Fix fuzzer .mk files missing TGT_LDLIBS (link failure on ubuntu-24-04)
