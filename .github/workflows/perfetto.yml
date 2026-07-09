@@ -93,6 +93,8 @@ jobs:
           afl-cc -c /tmp/fuzzer_driver.c -o /tmp/fuzzer_driver.o
           sudo ar rcs /usr/lib/libFuzzingEngine.a /tmp/fuzzer_driver.o
           cd /tmp/src/perfetto
+          # Fix missing #include <cstring> in fuzzer source
+          sed -i '1i #include <cstring>' src/ipc/buffered_frame_deserializer_fuzzer.cc 2>/dev/null || true
           set +e
           export CFLAGS="$CFLAGS -Wno-extra-semi-stmt"
           export CXXFLAGS="$CXXFLAGS -Wno-extra-semi-stmt"

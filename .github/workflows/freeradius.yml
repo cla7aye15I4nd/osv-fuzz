@@ -81,9 +81,9 @@ jobs:
                   echo 'TGT_LDLIBS		:= $(LIBS)' >> "$mk"
               fi
           done
-          # Configure with system compiler (afl-cc can't produce standalone
-          # executables for configure tests). FUZZ flags handle instrumentation.
-          CC=clang CXX=clang++ \
+          # Configure with system compiler and clean flags (ASAN shared lib
+          # isn't on LD_LIBRARY_PATH so autotools can't run test binaries)
+          CC=clang CXX=clang++ CFLAGS="" CXXFLAGS="" LDFLAGS="" \
             ./configure --enable-fuzzer --enable-address-sanitizer
           # Preload ASAN shared runtime so GNU make can dlopen ASAN-instrumented
           # build helpers (libfreeradius-make-dlopen.so is loaded via make's

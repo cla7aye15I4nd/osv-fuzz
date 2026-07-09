@@ -57,7 +57,7 @@ jobs:
           export CFLAGS="${CFLAGS:-} -fsanitize=address"
           export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
           export FUZZING_ENGINE=afl
-          export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
+          export LIB_FUZZING_ENGINE="-fsanitize=fuzzer -lcurl -larchive -lzstd -llzma -lz"
           export SANITIZER=address
           export ARCHITECTURE=x86_64
           export SRC=/tmp/src
