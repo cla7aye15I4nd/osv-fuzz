@@ -64,17 +64,11 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
-          # Build libsodium with system compiler (not afl-cc) to avoid
-          # AFL++ instrumentation issues with autotools configure tests
-          pushd /tmp/src/libsodium
-          chmod +x autogen.sh 2>/dev/null || true
-          DO_NOT_UPDATE_CONFIG_SCRIPTS=1 ./autogen.sh
-          CC=cc CXX=c++ CFLAGS="" CXXFLAGS="" LDFLAGS="" \
-            ./configure --disable-shared --prefix=/install_prefix --disable-asm
-          make -j$(nproc) V=1 install DESTDIR=/tmp/zmq_install_dir
-          popd
-          # Patch ci_build.sh to skip the libsodium build (already done above)
-          sed -i '/^cd "\${SRC}\/libsodium"/,/^cd "\${SRC}\/libzmq"/{ /^cd "\${SRC}\/libzmq"/!d; }' /tmp/src/libzmq/builds/fuzz/ci_build.sh
+          # Set AFL_PASSTHROUGH during libsodium configure to prevent AFL++
+          # from breaking autotools test programs. Patch ci_build.sh inline.
+          export ASAN_OPTIONS=detect_leaks=0
+          sed -i 's|cd "${SRC}/libsodium"|cd "${SRC}/libsodium"\nexport AFL_PASSTHROUGH=1|' /tmp/src/libzmq/builds/fuzz/ci_build.sh
+          sed -i 's|cd "${SRC}/libzmq"|unset AFL_PASSTHROUGH\ncd "${SRC}/libzmq"|' /tmp/src/libzmq/builds/fuzz/ci_build.sh
           cd /tmp/src/libzmq
           set +e
           /tmp/src/libzmq/builds/fuzz/ci_build.sh

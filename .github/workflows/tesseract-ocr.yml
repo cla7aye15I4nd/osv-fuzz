@@ -69,6 +69,9 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+          # Create ldconfig wrapper that uses sudo (oss-fuzz scripts call ldconfig without sudo)
+          printf '#!/bin/sh\nexec sudo /sbin/ldconfig "$@"\n' | sudo tee /usr/local/bin/ldconfig > /dev/null
+          sudo chmod +x /usr/local/bin/ldconfig
           cd /tmp/src
           set +e
           /tmp/src/tesseract/unittest/fuzzers/oss-fuzz-build.sh
