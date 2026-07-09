@@ -104,7 +104,8 @@ jobs:
                 ..
           make -j$(nproc)
           DEPS=/deps
-          mkdir -p ${DEPS}
+          sudo mkdir -p ${DEPS}
+          sudo chmod 777 ${DEPS}
           find . -name "libxml2.a" -exec cp {} ${DEPS}/libxml2.a \;
           ls -la ${DEPS}/libxml2.a
           cd /tmp/src/libarchive

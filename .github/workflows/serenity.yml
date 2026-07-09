@@ -47,7 +47,10 @@ jobs:
           export CC=afl-cc
           export CXX=afl-c++
           export CFLAGS="${CFLAGS:-} -fsanitize=address"
-          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          # oss-fuzz base-builder sets -stdlib=libc++; replicate that here so
+          # SerenityOS picks up libc++ (needed for C++20/23 coroutine headers
+          # that libstdc++ may lack on this runner)
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address -stdlib=libc++"
           export FUZZING_ENGINE=afl
           export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
           export SANITIZER=address
@@ -55,6 +58,7 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          export ASAN_OPTIONS=detect_leaks=0
           # Take ownership of /usr/local for install commands (Docker runs as root)
           sudo chown -R $(id -u):$(id -g) /usr/local 2>/dev/null || true
           # Allow ldconfig to update cache
@@ -64,6 +68,13 @@ jobs:
           cd /tmp/src/serenity/Meta/Lagom
           set +e
           ./BuildFuzzers.sh --oss-fuzz
+          # If BuildFuzzers.sh failed before its cp step, salvage any Fuzz*
+          # binaries that ninja did manage to produce.
+          if [ "$(find $OUT -type f -executable 2>/dev/null | wc -l)" -eq 0 ]; then
+            echo "[*] BuildFuzzers.sh did not copy targets, searching build dir..."
+            find Build/fuzzers/bin -name 'Fuzz*' -type f -executable 2>/dev/null | \
+              while read f; do cp -v "$f" "$OUT/"; done
+          fi
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)

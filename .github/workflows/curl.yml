@@ -46,8 +46,8 @@ jobs:
           mkdir -p build/fuzz-targets /tmp/work
           export CC=afl-cc
           export CXX=afl-c++
-          export CFLAGS="${CFLAGS:-} -fsanitize=address"
-          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export CFLAGS="${CFLAGS:-} -fsanitize=address -Wno-error"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address -Wno-error"
           export FUZZING_ENGINE=afl
           export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
           export SANITIZER=address
@@ -55,16 +55,32 @@ jobs:
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
+          # Prevent ASAN leak detector from failing configure tests
+          export ASAN_OPTIONS=detect_leaks=0
+          # OpenSSL Configure reads this; set empty to avoid undefined variable
+          export OPENSSLFLAGS=""
           # Take ownership of /usr/local for install commands
           sudo chown -R $(id -u):$(id -g) /usr/local 2>/dev/null || true
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+          # Install ninja-build and groff (needed by curl-fuzzer build)
+          sudo apt-get install -y -qq ninja-build groff-base 2>/dev/null || true
           cd /tmp/src/curl-fuzzer
-          # Override hardcoded /src/curl path in ossfuzz.sh
+          # Override hardcoded /src/curl path in ossfuzz.sh and scripts
           sed -i 's|/src/curl|/tmp/src/curl|g' ossfuzz.sh
           set +e
           ./ossfuzz.sh
+          # If ossfuzz.sh failed partway through, salvage any targets that
+          # were built but not yet copied by ossfuzz.sh's own cp step.
+          if [ "$(find $OUT -type f -executable 2>/dev/null | wc -l)" -eq 0 ]; then
+            echo "[*] ossfuzz.sh did not produce targets, searching build dir..."
+            for t in build/curl_fuzzer build/curl_fuzzer_* build/fuzz_*; do
+              [ -x "$t" ] && cp -v "$t" "$OUT/" 2>/dev/null || true
+            done
+            # Also grab dict/options files
+            cp -v ossconfig/*.dict ossconfig/*.options "$OUT/" 2>/dev/null || true
+          fi
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)

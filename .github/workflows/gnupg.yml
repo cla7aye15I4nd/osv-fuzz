@@ -93,17 +93,29 @@ jobs:
           mkdir -p g10/.libs
           find g10 -name '*.o' -type f ! -name 'gpg.o' ! -name 't-*.o' | xargs ar cru g10/.libs/libgpg.a
           ranlib g10/.libs/libgpg.a
+          # Locate .a files — autotools may place them in .libs/ subdirectories
+          LIBGPG=$(find g10 -name 'libgpg.a' -type f | head -1)
+          LIBKEYBOX=$(find kbx -name 'libkeybox.a' -type f | head -1)
+          LIBCOMMONPTH=$(find common -name 'libcommonpth.a' -type f | head -1)
+          LIBREGEXP=$(find regexp -name 'libregexp.a' -type f | head -1)
+          LIBGPGRL=$(find common -name 'libgpgrl.a' -type f | head -1)
+          echo "[+] Library paths:"
+          echo "  libgpg.a      = $LIBGPG"
+          echo "  libkeybox.a   = $LIBKEYBOX"
+          echo "  libcommonpth.a= $LIBCOMMONPTH"
+          echo "  libregexp.a   = $LIBREGEXP"
+          echo "  libgpgrl.a    = $LIBGPGRL"
           cd /tmp/src/gnupg
           $CC $CFLAGS -I. -Icommon -Ig10 -c /tmp/src/fuzzer_stubs.c -o fuzzer_stubs.o
           for fuzzer in fuzz_decrypt fuzz_import fuzz_list fuzz_verify; do
             [ -f /tmp/src/${fuzzer}.c ] || continue
             $CC $CFLAGS -I. -Icommon -Ig10 -c /tmp/src/${fuzzer}.c -o ${fuzzer}.o
             $CXX $CXXFLAGS fuzzer_stubs.o ${fuzzer}.o \
-              g10/.libs/libgpg.a \
-              kbx/libkeybox.a \
-              common/libcommonpth.a \
-              regexp/libregexp.a \
-              common/libgpgrl.a \
+              $LIBGPG \
+              $LIBKEYBOX \
+              $LIBCOMMONPTH \
+              $LIBREGEXP \
+              $LIBGPGRL \
               $LIB_FUZZING_ENGINE \
               -lgcrypt -lgpg-error -lassuan -lksba -lnpth -lutil \
               -o $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer}

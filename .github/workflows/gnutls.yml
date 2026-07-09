@@ -50,9 +50,17 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive git://git.savannah.gnu.org/gnulib.git /tmp/src/gnulib
-          git clone --depth 1 --recursive --branch nettle_3.10.1_release_20241230 https://git.lysator.liu.se/nettle/nettle.git /tmp/src/nettle
-          git clone --depth 1 --recursive https://gitlab.com/gnutls/gnutls.git /tmp/src/gnutls
+          git clone --depth 500 git://git.savannah.gnu.org/gnulib.git /tmp/src/gnulib
+          # Download dependency tarballs (matching oss-fuzz Dockerfile)
+          cd /tmp/src
+          wget -qO- https://ftp.gnu.org/gnu/libunistring/libunistring-latest.tar.gz | tar xz && mv libunistring-* libunistring
+          wget -qO- https://ftp.gnu.org/gnu/libidn/libidn2-latest.tar.gz | tar xz && mv libidn2-* libidn2
+          wget -qO- https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.gz | tar xz && mv gmp-* gmp
+          wget -qO- https://ftp.gnu.org/gnu/libtasn1/libtasn1-4.20.0.tar.gz | tar xz && mv libtasn1-* libtasn1
+          git clone --depth 1 --branch nettle_3.10.1_release_20241230 https://git.lysator.liu.se/nettle/nettle.git /tmp/src/nettle
+          # Try twice in case of network issues
+          git clone --depth 1 --recursive https://gitlab.com/gnutls/gnutls.git /tmp/src/gnutls || \
+            git clone --depth 1 --recursive https://gitlab.com/gnutls/gnutls.git /tmp/src/gnutls
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -81,6 +89,7 @@ jobs:
           export CPPFLAGS="-I$DEPS_PATH/include"
           export LDFLAGS="-L$DEPS_PATH/lib -L$DEPS_PATH/lib64"
           export GNULIB_SRCDIR=/tmp/src/gnulib
+          export GNULIB_TOOL=$GNULIB_SRCDIR/gnulib-tool
           if grep -q -F "20.04" /etc/os-release ; then
               cd /tmp
               wget https://archive.ubuntu.com/ubuntu/pool/main/a/autoconf/autoconf_2.71-2_all.deb
@@ -105,7 +114,8 @@ jobs:
           make -j"$(nproc)"
           make install
           cd /tmp/src/libtasn1
-          ./configure --disable-gcc-warnings --disable-gtk-doc --disable-gtk-doc-pdf --disable-doc \
+          ASAN_OPTIONS=detect_leaks=0 \
+            ./configure --disable-gcc-warnings --disable-gtk-doc --disable-gtk-doc-pdf --disable-doc \
             --disable-shared --enable-static --prefix="$DEPS_PATH"
           make -j"$(nproc)"
           make install

@@ -34,6 +34,7 @@ jobs:
             cmake \
             ninja-build \
             lld \
+            libomp-dev \
             wget
 
       - name: Clone source
@@ -73,6 +74,10 @@ jobs:
           sudo ln -f -s /usr/local/bin/lld /usr/bin/ld
           # Patch oss-fuzz.sh: its ln command needs sudo on GitHub Actions (not running as root)
           sed -i 's|ln -f -s /usr/local/bin/lld /usr/bin/ld|sudo ln -f -s /usr/local/bin/lld /usr/bin/ld|' /tmp/src/librawspeed/.ci/oss-fuzz.sh
+          # Disable -Werror: linker flags in CXXFLAGS (-lc++ -lc++abi from libc++ build)
+          # trigger "unused command-line argument" warnings during compilation, which
+          # -Werror (from RAWSPEED_ENABLE_WERROR=ON default) turns into fatal errors
+          sed -i 's|-DCMAKE_BUILD_TYPE=FUZZ|-DCMAKE_BUILD_TYPE=FUZZ -DRAWSPEED_ENABLE_WERROR=OFF|' /tmp/src/librawspeed/.ci/oss-fuzz.sh
           /tmp/src/librawspeed/.ci/oss-fuzz.sh
           set -e
           # Verify at least one fuzz target was built

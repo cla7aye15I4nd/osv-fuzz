@@ -84,7 +84,7 @@ jobs:
           export CC=afl-cc
           export CXX=afl-c++
           export CFLAGS="${CFLAGS:-} -fsanitize=address"
-          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address -include cstdint"
           export FUZZING_ENGINE=afl
           export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
           export SANITIZER=address
@@ -100,6 +100,8 @@ jobs:
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/
           set +e
+          # PCL's build.sh uses hardcoded /src/pcl/ paths (oss-fuzz convention)
+          sudo ln -sf /tmp/src /src
           chmod +x /tmp/src/pcl/test/fuzz/build.sh
           /tmp/src/pcl/test/fuzz/build.sh
           set -e
