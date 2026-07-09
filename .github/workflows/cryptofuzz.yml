@@ -1,0 +1,647 @@
+name: "Fuzz cryptofuzz"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 22 * * 0"
+
+env:
+  PROJECT: cryptofuzz
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            bison \
+            bsdmainutils \
+            cmake \
+            flex \
+            gyp \
+            libsqlite3-dev \
+            libssl-dev \
+            libtool \
+            lzip \
+            mercurial \
+            ninja-build \
+            texinfo \
+            zlib1g-dev
+
+      - name: Clone source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 --recursive https://github.com/golang/go /tmp/src/go-dev
+          git clone --depth 1 --recursive https://github.com/golang/crypto /tmp/src/go-crypto
+          git clone --depth 1 --recursive https://github.com/golang/sys.git /tmp/src/go-sys
+          git clone --depth 1 --no-recurse-submodules https://github.com/guidovranken/cryptofuzz /tmp/src/cryptofuzz
+          cd /tmp/src/cryptofuzz && git submodule update --init --depth 1 fuzzing-headers || true
+          git clone --depth 1 https://github.com/guidovranken/cryptofuzz-corpora /tmp/src/cryptofuzz-corpora || true
+          git clone --depth 1 --recursive https://github.com/openssl/openssl /tmp/src/openssl
+          git clone --depth 1 --recursive https://boringssl.googlesource.com/boringssl /tmp/src/boringssl
+          git clone --depth 1 --recursive git://git.gnupg.org/libgcrypt.git /tmp/src/libgcrypt
+          git clone --depth 1 --recursive https://github.com/weidai11/cryptopp/ /tmp/src/cryptopp
+          git clone --depth 1 --recursive https://github.com/google/cityhash.git /tmp/src/cityhash
+          git clone --depth 1 --recursive https://github.com/randombit/botan.git /tmp/src/botan
+          git clone --depth 1 --recursive https://github.com/wolfSSL/wolfssl.git /tmp/src/wolfssl
+          git clone --depth 1 --recursive https://github.com/wolfSSL/wolfsm /tmp/src/wolfsm || true
+          git clone --depth 1 --recursive https://github.com/jedisct1/libsodium.git /tmp/src/libsodium
+          git clone --depth 1 --recursive https://github.com/libtom/libtomcrypt.git /tmp/src/libtomcrypt
+          git clone --depth 1 --recursive https://github.com/microsoft/SymCrypt.git /tmp/src/SymCrypt
+          git clone --depth 1 --recursive https://github.com/indutny/bn.js.git /tmp/src/bn.js
+          git clone --depth 1 --recursive https://github.com/MikeMcl/bignumber.js.git /tmp/src/bignumber.js
+          git clone --depth 1 --recursive https://github.com/guidovranken/libfuzzer-js.git /tmp/src/libfuzzer-js
+          git clone --depth 1 --recursive https://github.com/brix/crypto-js.git /tmp/src/crypto-js
+          git clone --depth 1 --recursive https://github.com/trezor/trezor-firmware.git /tmp/src/trezor-firmware
+          git clone --depth 1 --recursive https://github.com/Cyan4973/xxHash.git /tmp/src/xxHash
+          git clone --depth 1 --recursive https://github.com/paulmillr/noble-ed25519.git /tmp/src/noble-ed25519
+          git clone --depth 1 --recursive https://github.com/paulmillr/noble-bls12-381.git /tmp/src/noble-bls12-381
+          git clone --depth 1 --recursive https://github.com/paulmillr/noble-secp256k1.git /tmp/src/noble-secp256k1
+          git clone --depth 1 --recursive https://github.com/supranational/blst.git /tmp/src/blst
+          git clone --depth 1 --recursive https://github.com/bitcoin-core/secp256k1.git /tmp/src/secp256k1
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          curl -sL -o /tmp/src/xxd.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/cryptofuzz/xxd.c"
+
+      - name: Build fuzz targets with AFL++
+        run: |
+          mkdir -p build/fuzz-targets /tmp/work
+          export CC=afl-cc
+          export CXX=afl-c++
+          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export FUZZING_ENGINE=afl
+          export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
+          export SANITIZER=address
+          export ARCHITECTURE=x86_64
+          export SRC=/tmp/src
+          export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
+          export WORK=/tmp/work
+          # Take ownership of /usr/local for install commands (Docker runs as root)
+          sudo chown -R $(id -u):$(id -g) /usr/local 2>/dev/null || true
+          # Allow ldconfig to update cache
+          sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
+          sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
+          echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+          cd /tmp/src
+          set +e
+          export CXXFLAGS="$CXXFLAGS -D_LIBCPP_DEBUG=1"
+          export GO111MODULE=off
+          mkdir /tmp/src/go-bootstrap
+          cd /tmp/src/go-bootstrap
+          tar zxf /tmp/src/go1.23.1.linux-amd64.tar.gz
+          mv go/ go-123
+          export GOROOT_123=/tmp/src/go-bootstrap/go-123/
+          export GOPATH_123=$GOROOT_123/packages/
+          mkdir $GOPATH_123
+          mkdir -p $GOPATH_123/src/golang.org/x/crypto/
+          cp -R /tmp/src/go-crypto/* $GOPATH_123/src/golang.org/x/crypto/
+          mkdir -p $GOPATH_123/src/golang.org/x/sys/
+          cp -R /tmp/src/go-sys/* $GOPATH_123/src/golang.org/x/sys/
+          export PATH_GO_123=$GOROOT_123/bin:$GOROOT_123/packages/bin:$PATH
+          tar zxf /tmp/src/go1.22.7.linux-amd64.tar.gz
+          mv go/ go-122
+          export GOROOT_122=/tmp/src/go-bootstrap/go-122/
+          export GOPATH_122=$GOROOT_122/packages/
+          mkdir $GOPATH_122
+          mkdir -p $GOPATH_122/src/golang.org/x/crypto/
+          cp -R /tmp/src/go-crypto/* $GOPATH_122/src/golang.org/x/crypto/
+          mkdir -p $GOPATH_122/src/golang.org/x/sys/
+          cp -R /tmp/src/go-sys/* $GOPATH_122/src/golang.org/x/sys/
+          export PATH_GO_122=$GOROOT_122/bin:$GOROOT_122/packages/bin:$PATH
+          cd /tmp/src/go-dev/src/
+          export OLD_PATH=$PATH
+          PATH="$PATH_GO_123" ./make.bash
+          export GOROOT_DEV=$(realpath ../)
+          export GOPATH_DEV=$GOROOT_DEV/packages
+          mkdir $GOPATH_DEV
+          mkdir -p $GOPATH_DEV/src/golang.org/x/crypto/
+          cp -R /tmp/src/go-crypto/* $GOPATH_DEV/src/golang.org/x/crypto/
+          mkdir -p $GOPATH_DEV/src/golang.org/x/sys/
+          cp -R /tmp/src/go-sys/* $GOPATH_DEV/src/golang.org/x/sys/
+          export PATH_GO_DEV=$GOROOT_DEV/bin:$GOROOT_DEV/packages/bin:$PATH
+          if [[ $CFLAGS != *sanitize=memory* && $CFLAGS != *-m32* ]]
+          then
+              export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_GOLANG"
+          fi
+          if [[ $CFLAGS != *sanitize=memory* && $CFLAGS != *-m32* ]]
+          then
+              cd /tmp/src/
+              tar Jxf node-v14.17.1-linux-x64.tar.xz
+              export PATH="$PATH:/tmp/src/node-v14.17.1-linux-x64/bin/"
+          fi
+          $CC /tmp/src/xxd.c -o /usr/bin/xxd
+          rm -rf /tmp/src/cryptofuzz/modules/reference/xxHash/
+          cp -R /tmp/src/xxHash/ /tmp/src/cryptofuzz/modules/reference/
+          cd /tmp/src/
+          tar jxf boost_1_84_0.tar.bz2
+          cd boost_1_84_0/
+          CFLAGS="" CXXFLAGS="" ./bootstrap.sh
+          CFLAGS="" CXXFLAGS="" ./b2 headers
+          cp -R boost/ /usr/include/
+          export LINK_FLAGS=""
+          if [[ $CFLAGS = *-m32* ]]
+          then
+              export LINK_FLAGS="$LINK_FLAGS -latomic"
+          fi
+          export INCLUDE_PATH_FLAGS=""
+          cd /tmp/src/cryptofuzz
+          python gen_repository.py
+          export CXXFLAGS="$CXXFLAGS -D_GLIBCXX_DEBUG"
+          export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_DISABLE_SPECIAL_ECDH"
+          export CXXFLAGS="$CXXFLAGS -I /tmp/src/cryptofuzz/fuzzing-headers/include"
+          if [[ $CFLAGS = *sanitize=memory* ]]
+          then
+              export CXXFLAGS="$CXXFLAGS -DMSAN"
+          fi
+          if [[ $CFLAGS != *sanitize=memory* && $CFLAGS != *-m32* ]]
+          then
+              export LIBFUZZER_A_PATH="$LIB_FUZZING_ENGINE"
+              cd /tmp/src/libfuzzer-js/
+              make
+              export LIBFUZZER_JS_PATH=$(realpath .)
+              export LINK_FLAGS="$LINK_FLAGS $LIBFUZZER_JS_PATH/js.o $LIBFUZZER_JS_PATH/quickjs/libquickjs.a"
+              export BN_JS_PATH="/tmp/src/bn.js/lib/bn.js"
+              export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_BN_JS"
+              cd /tmp/src/cryptofuzz/modules/bn.js/
+              make
+              export BIGNUMBER_JS_PATH="/tmp/src/bignumber.js/bignumber.js"
+              export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_BIGNUMBER_JS"
+              cd /tmp/src/cryptofuzz/modules/bignumber.js/
+              make
+              export CRYPTO_JS_PATH="/tmp/src/crypto-js/"
+              export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_CRYPTO_JS"
+              cd /tmp/src/cryptofuzz/modules/crypto-js/
+              make
+          fi
+          if [[ $CFLAGS != *-m32* && "$SANITIZER" != "coverage" ]]
+          then
+              cd /tmp/src/
+              tar Jxf zig-latest.tar.xz
+              export ZIG_BIN=$(realpath zig-linux-x86_64*/zig)
+              cd /tmp/src/cryptofuzz/modules/zig/
+              make -j$(nproc)
+              export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_ZIG"
+          fi
+          if [[ $CFLAGS != *-m32* ]]
+          then
+              mkdir /tmp/src/nss-nspr
+              mv /tmp/src/nss /tmp/src/nss-nspr/
+              mv /tmp/src/nspr /tmp/src/nss-nspr/
+              cd /tmp/src/nss-nspr/
+              export CFLAGS="$CFLAGS -Wno-unused-but-set-variable"
+              CXX="$CXX -stdlib=libc++" LDFLAGS="$CFLAGS" nss/build.sh --enable-fips --static --disable-tests --fuzz=oss
+              export NSS_NSPR_PATH=$(realpath /tmp/src/nss-nspr/)
+              export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_NSS"
+              export LINK_FLAGS="$LINK_FLAGS -lsqlite3"
+              cd /tmp/src/cryptofuzz/modules/nss
+              make -B
+          fi
+          cd /tmp/src/trezor-firmware/crypto
+          sed -i "s/\<blake2b_\([A-Za-z_]\)/trezor_blake2b_\1/g" *.c *.h
+          sed -i 's/\<blake2b(/trezor_blake2b(/g' *.c *.h
+          export TREZOR_FIRMWARE_PATH=$(realpath /tmp/src/trezor-firmware)
+          export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_TREZOR_FIRMWARE"
+          cd /tmp/src/cryptofuzz/modules/trezor
+          make -B
+          cd /tmp/src/libtomcrypt
+          if [[ $CFLAGS != *sanitize=memory* ]]
+          then
+              make -j$(nproc)
+              export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_LIBTOMCRYPT"
+              export LIBTOMCRYPT_INCLUDE_PATH=$(realpath src/headers/)
+              export LIBTOMCRYPT_A_PATH=$(realpath libtomcrypt.a)
+              cd /tmp/src/cryptofuzz/modules/libtomcrypt
+              make -B
+          fi
+          cd /tmp/src/secp256k1/
+          autoreconf -ivf
+          export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_SECP256K1"
+          if [[ $CFLAGS = *sanitize=memory* ]]
+          then
+              ./configure --enable-static --disable-tests --disable-benchmark --disable-exhaustive-tests --enable-module-recovery --enable-experimental --enable-module-schnorrsig --enable-module-ecdh --with-asm=no
+          else
+              ./configure --enable-static --disable-tests --disable-benchmark --disable-exhaustive-tests --enable-module-recovery --enable-experimental --enable-module-schnorrsig --enable-module-ecdh
+          fi
+          make
+          export SECP256K1_INCLUDE_PATH=$(realpath .)
+          export LIBSECP256K1_A_PATH=$(realpath .libs/libsecp256k1.a)
+          cd /tmp/src/cryptofuzz/modules/secp256k1/
+          make -B -j$(nproc)
+          if [[ $CFLAGS != *-m32* ]]
+          then
+              cd /tmp/src/SymCrypt/
+              sed -i '/.*x86-speculative-load-hardening.*/d' lib/CMakeLists.txt
+              sed -i "s/^add_subdirectory(unittest)$//g" CMakeLists.txt
+              mkdir b/
+              cd b/
+              if [[ $CFLAGS = *sanitize=memory* ]]
+              then
+                  cmake -DSYMCRYPT_USE_ASM=off ../
+              else
+                  cmake ../
+              fi
+              make symcrypt_common symcrypt_generic -j$(nproc)
+              export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_SYMCRYPT"
+              export SYMCRYPT_INCLUDE_PATH=$(realpath ../inc/)
+              export LIBSYMCRYPT_COMMON_A_PATH=$(realpath lib/libsymcrypt_common.a)
+              export SYMCRYPT_GENERIC_A_PATH=$(realpath lib/symcrypt_generic.a)
+              cd /tmp/src/cryptofuzz/modules/symcrypt
+              make -B
+          fi
+          cd /tmp/src/libgmp/
+          autoreconf -ivf
+          if [[ $CFLAGS = *-m32* ]]
+          then
+              setarch i386 ./configure --enable-maintainer-mode --enable-assert
+          elif [[ $CFLAGS = *sanitize=memory* ]]
+          then
+              ./configure --enable-maintainer-mode --enable-assert --disable-assembly
+          else
+              ./configure --enable-maintainer-mode --enable-assert
+          fi
+          make -j$(nproc)
+          export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_LIBGMP"
+          export LIBGMP_INCLUDE_PATH=$(realpath .)
+          export LIBGMP_A_PATH=$(realpath .libs/libgmp.a)
+          cd /tmp/src/cryptofuzz/modules/libgmp
+          make -B
+          cd /tmp/src/
+          tar zxf mpdecimal-4.0.0.tar.gz
+          cd mpdecimal-4.0.0/
+          ./configure
+          cd libmpdec/
+          make libmpdec.a -j$(nproc)
+          cd ../
+          export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_MPDECIMAL"
+          export LIBMPDEC_A_PATH=$(realpath libmpdec/libmpdec.a)
+          export LIBMPDEC_INCLUDE_PATH=$(realpath libmpdec/)
+          cd /tmp/src/cryptofuzz/modules/mpdecimal
+          make -B
+          cd /tmp/src/cityhash
+          if [[ $CFLAGS != *-m32* ]]
+          then
+              CXXFLAGS="$CXXFLAGS -msse4.2" ./configure --disable-shared
+          else
+              ./configure --disable-shared
+          fi
+          make -j$(nproc)
+          export CXXFLAGS="$CXXFLAGS -I/tmp/src/cityhash/src"
+          export CRYPTOFUZZ_REFERENCE_CITY_O_PATH="/tmp/src/cityhash/src/city.o"
+          cd /tmp/src/cryptopp
+          if [[ $CFLAGS != *sanitize=memory* ]]
+          then
+              make libcryptopp.a -j$(nproc)
+          else
+              export CXXFLAGS="$CXXFLAGS -DCRYPTOPP_DISABLE_ASM=1"
+              make libcryptopp.a -j$(nproc)
+          fi
+          export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_CRYPTOPP"
+          export LIBCRYPTOPP_A_PATH="/tmp/src/cryptopp/libcryptopp.a"
+          export CRYPTOPP_INCLUDE_PATH="/tmp/src/cryptopp"
+          cd /tmp/src/cryptofuzz/modules/cryptopp
+          make -B
+          cd /tmp/src/mbedtls/
+          scripts/config.py set MBEDTLS_PLATFORM_MEMORY
+          scripts/config.py set MBEDTLS_CMAC_C
+          scripts/config.py set MBEDTLS_NIST_KW_C
+          scripts/config.py set MBEDTLS_ARIA_C
+          if [[ $CFLAGS == *sanitize=memory* ]]
+          then
+              scripts/config.py unset MBEDTLS_HAVE_ASM
+              scripts/config.py unset MBEDTLS_PADLOCK_C
+              scripts/config.py unset MBEDTLS_AESNI_C
+              scripts/config.py unset MBEDTLS_AESCE_C
+          fi
+          mkdir build/
+          cd build/
+          cmake .. -DENABLE_PROGRAMS=0 -DENABLE_TESTING=0
+          make -j$(nproc)
+          export MBEDTLS_LIBMBEDCRYPTO_A_PATH="/tmp/src/mbedtls/build/library/libmbedcrypto.a"
+          export MBEDTLS_INCLUDE_PATH="/tmp/src/mbedtls/include"
+          export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_MBEDTLS -DCRYPTOFUZZ_TF_PSA_CRYPTO"
+          cd /tmp/src/cryptofuzz/modules/mbedtls
+          make -B
+          cd /tmp/src/cryptofuzz/modules/tf-psa-crypto
+          make -B
+          cd /tmp/src/botan
+          if [[ $CFLAGS != *-m32* ]]
+          then
+              if [[ $CFLAGS != *sanitize=memory* ]]
+              then
+                  ./configure.py --cc-bin=$CXX --cc-abi-flags="$CXXFLAGS" --disable-shared --disable-modules=locking_allocator --build-targets=static --without-documentation
+              else
+                  ./configure.py --disable-asm --cc-bin=$CXX --cc-abi-flags="$CXXFLAGS" --disable-shared --disable-modules=locking_allocator --build-targets=static --without-documentation
+              fi
+          else
+              ./configure.py --cpu=x86_32 --cc-bin=$CXX --cc-abi-flags="$CXXFLAGS" --disable-shared --disable-modules=locking_allocator --build-targets=static --without-documentation
+          fi
+          make -j$(nproc)
+          export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_BOTAN"
+          export LIBBOTAN_A_PATH="/tmp/src/botan/libbotan-3.a"
+          export BOTAN_INCLUDE_PATH="/tmp/src/botan/build/include"
+          cd /tmp/src/cryptofuzz/modules/botan
+          make -B
+          if [[ $CFLAGS != *sanitize=memory* ]]
+          then
+              cd /tmp/src/
+              tar jxvf libgpg-error-1.49.tar.bz2
+              cd libgpg-error-1.49/
+              if [[ $CFLAGS != *-m32* ]]
+              then
+                  ./configure --enable-static
+              else
+                  ./configure --enable-static --host=i386
+              fi
+              ASAN_OPTIONS=detect_leaks=0 make -j$(nproc)
+              make install
+              export LINK_FLAGS="$LINK_FLAGS /tmp/src/libgpg-error-1.49/src/.libs/libgpg-error.a"
+              cd /tmp/src/libgcrypt
+              autoreconf -ivf
+              if [[ $CFLAGS = *-m32* ]]
+              then
+                  ./configure --enable-static --disable-doc --disable-jent-support --host=i386
+              else
+                  ./configure --enable-static --disable-doc --disable-jent-support
+              fi
+              make -j$(nproc)
+              export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_LIBGCRYPT"
+              export LIBGCRYPT_A_PATH="/tmp/src/libgcrypt/src/.libs/libgcrypt.a"
+              export LIBGCRYPT_INCLUDE_PATH="/tmp/src/libgcrypt/src"
+              cd /tmp/src/cryptofuzz/modules/libgcrypt
+              make -B
+          fi
+          cd /tmp/src/libsodium
+          autoreconf -ivf
+          if [[ $CFLAGS != *sanitize=memory* ]]
+          then
+              ./configure
+          else
+              ./configure --disable-asm
+          fi
+          make -j$(nproc)
+          export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_LIBSODIUM"
+          export LIBSODIUM_A_PATH="/tmp/src/libsodium/src/libsodium/.libs/libsodium.a"
+          export LIBSODIUM_INCLUDE_PATH="/tmp/src/libsodium/src/libsodium/include"
+          cd /tmp/src/cryptofuzz/modules/libsodium
+          make -B
+          export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_REFERENCE"
+          cd /tmp/src/cryptofuzz/modules/reference
+          make -B
+          export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_VERACRYPT"
+          cd /tmp/src/cryptofuzz/modules/veracrypt
+          make -B
+          export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_MONERO"
+          cd /tmp/src/cryptofuzz/modules/monero
+          make -B
+          if [[ $CFLAGS != *sanitize=memory* && $CFLAGS != *-m32* ]]
+          then
+              cd /tmp/src/cryptofuzz/modules/golang
+              GOROOT="$GOROOT_123" GOPATH="$GOPATH_123" PATH="$PATH_GO_123" make -B
+          fi
+          if [[ $CFLAGS != *-m32* ]]
+          then
+              cd /tmp/src/cryptofuzz
+              LIBFUZZER_LINK="$LIB_FUZZING_ENGINE" CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_NO_OPENSSL $INCLUDE_PATH_FLAGS" make -B -j$(nproc)
+              ./generate_dict
+              if [ "$SANITIZER" = undefined ]; then
+                  patchelf --set-rpath '$ORIGIN/lib/jdk-18.0.1/lib/server/' /tmp/src/cryptofuzz/cryptofuzz
+              fi
+              cp /tmp/src/cryptofuzz/cryptofuzz $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-nss
+              cp /tmp/src/cryptofuzz/cryptofuzz-dict.txt $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-nss.dict
+              cp /tmp/src/cryptofuzz-corpora/libressl_latest.zip $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-nss_seed_corpus.zip
+              rm /tmp/src/cryptofuzz/modules/nss/module.a
+              CXXFLAGS=${CXXFLAGS//"-DCRYPTOFUZZ_NSS"/}
+              LINK_FLAGS=${LINK_FLAGS//"-lsqlite3"/}
+          fi
+          rm -f /tmp/src/cryptofuzz/modules/golang/module.a
+          if [[ $CFLAGS != *sanitize=memory* ]]
+          then
+              export CXXFLAGS=${CXXFLAGS/-DCRYPTOFUZZ_LIBTOMCRYPT/}
+              rm -rf "$LIBTOMCRYPT_A_PATH"
+          fi
+          cd /tmp/src/wolfsm/
+          ./install.sh
+          cd /tmp/src/wolfssl
+          export CFLAGS="$CFLAGS -DHAVE_AES_ECB -DWOLFSSL_DES_ECB -DHAVE_ECC_SECPR2 -DHAVE_ECC_SECPR3 -DHAVE_ECC_BRAINPOOL -DHAVE_ECC_KOBLITZ -DWOLFSSL_ECDSA_SET_K -DWOLFSSL_ECDSA_SET_K_ONE_LOOP"
+          autoreconf -ivf
+          export WOLFCRYPT_CONFIGURE_PARAMS="--enable-static --enable-md2 --enable-md4 --enable-ripemd --enable-blake2 --enable-blake2s --enable-pwdbased --enable-scrypt --enable-hkdf --enable-cmac --enable-arc4 --enable-camellia --enable-aesccm --enable-aesctr --enable-xts --enable-des3 --enable-x963kdf --enable-harden --enable-aescfb --enable-aesofb --enable-aeskeywrap --enable-aessiv --enable-shake256 --enable-curve25519 --enable-curve448 --disable-crypttests --disable-examples --enable-keygen --enable-compkey --enable-ed448 --enable-ed25519 --enable-ecccustcurves --enable-xchacha --enable-cryptocb --enable-eccencrypt --enable-aesgcm-stream --enable-shake128 --enable-siphash --enable-eccsi --with-eccminsz=0 --enable-aeseax --enable-ed25519-stream --enable-ed448-stream --enable-sm2 --enable-sm3 --enable-sm4-cbc --enable-sm4-ccm --enable-sm4-ctr --enable-sm4-ecb --enable-sm4-gcm --enable-smallstack"
+          if [[ $CFLAGS = *sanitize=memory* ]]
+          then
+              export WOLFCRYPT_CONFIGURE_PARAMS="$WOLFCRYPT_CONFIGURE_PARAMS -disable-asm"
+          fi
+          if [[ $CFLAGS = *-m32* ]]
+          then
+              export WOLFCRYPT_CONFIGURE_PARAMS="$WOLFCRYPT_CONFIGURE_PARAMS -disable-fastmath"
+          fi
+          ./configure $WOLFCRYPT_CONFIGURE_PARAMS
+          make -j$(nproc)
+          export CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_WOLFCRYPT"
+          export WOLFCRYPT_LIBWOLFSSL_A_PATH="/tmp/src/wolfssl/src/.libs/libwolfssl.a"
+          export WOLFCRYPT_INCLUDE_PATH="/tmp/src/wolfssl"
+          cd /tmp/src/cryptofuzz/modules/wolfcrypt
+          make -B
+          if [[ $CFLAGS != *sanitize=memory* && $CFLAGS != *-m32* ]]
+          then
+              cd /tmp/src/cryptofuzz/modules/golang
+              GOROOT="$GOROOT_122" GOPATH="$GOPATH_122" PATH="$PATH_GO_122" make -B
+          fi
+          export SAVE_CXXFLAGS="$CXXFLAGS"
+          export CXXFLAGS=${CXXFLAGS/-DCRYPTOFUZZ_WOLFCRYPT/}
+          if [[ $CFLAGS != *sanitize=memory* ]]
+          then
+              cd /tmp/src/openssl
+              if [[ $CFLAGS != *-m32* ]]
+              then
+                  ./config --debug enable-md2 enable-rc5
+              else
+                  setarch i386 ./config --debug enable-md2 enable-rc5
+              fi
+              make -j$(nproc)
+              cd /tmp/src/cryptofuzz/modules/openssl
+              OPENSSL_INCLUDE_PATH="/tmp/src/openssl/include" OPENSSL_LIBCRYPTO_A_PATH="/tmp/src/openssl/libcrypto.a" make -B
+              cd /tmp/src/cryptofuzz
+              LIBFUZZER_LINK="$LIB_FUZZING_ENGINE" CXXFLAGS="$CXXFLAGS -I /tmp/src/openssl/include $INCLUDE_PATH_FLAGS" make -B -j$(nproc)
+              ./generate_dict
+              if [ "$SANITIZER" = undefined ]; then
+                  patchelf --set-rpath '$ORIGIN/lib/jdk-18.0.1/lib/server/' /tmp/src/cryptofuzz/cryptofuzz
+              fi
+              cp /tmp/src/cryptofuzz/cryptofuzz $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-openssl
+              cp /tmp/src/cryptofuzz/cryptofuzz-dict.txt $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-openssl.dict
+              cp /tmp/src/cryptofuzz-corpora/openssl_latest.zip $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-openssl_seed_corpus.zip
+          fi
+          cd /tmp/src/openssl
+          if [[ $CFLAGS != *-m32* ]]
+          then
+              ./config --debug no-asm enable-md2 enable-rc5
+          else
+              setarch i386 ./config --debug no-asm enable-md2 enable-rc5
+          fi
+          make clean
+          make -j$(nproc)
+          cd /tmp/src/cryptofuzz/modules/openssl
+          OPENSSL_INCLUDE_PATH="/tmp/src/openssl/include" OPENSSL_LIBCRYPTO_A_PATH="/tmp/src/openssl/libcrypto.a" make -B
+          cd /tmp/src/cryptofuzz
+          LIBFUZZER_LINK="$LIB_FUZZING_ENGINE" CXXFLAGS="$CXXFLAGS -I /tmp/src/openssl/include $INCLUDE_PATH_FLAGS" make -B -j$(nproc)
+          ./generate_dict
+          if [ "$SANITIZER" = undefined ]; then
+              patchelf --set-rpath '$ORIGIN/lib/jdk-18.0.1/lib/server/' /tmp/src/cryptofuzz/cryptofuzz
+          fi
+          cp /tmp/src/cryptofuzz/cryptofuzz $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-openssl-noasm
+          cp /tmp/src/cryptofuzz/cryptofuzz-dict.txt $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-openssl-noasm.dict
+          cp /tmp/src/cryptofuzz-corpora/openssl_latest.zip $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-openssl-noasm_seed_corpus.zip
+          rm -f /tmp/src/cryptofuzz/modules/golang/module.a
+          export CXXFLAGS="$SAVE_CXXFLAGS"
+          if [[ $CFLAGS != *sanitize=memory* && $CFLAGS != *-m32* ]]
+          then
+              cd /tmp/src/cryptofuzz/modules/golang
+              GOROOT="$GOROOT_DEV" GOPATH="$GOPATH_DEV" PATH="$PATH_GO_DEV" make -B
+          fi
+          if [[ $CFLAGS != *sanitize=memory* ]]
+          then
+              cd /tmp/src/boringssl
+              rm -rf build ; mkdir build
+              cd build
+              if [[ $CFLAGS = *-m32* ]]
+              then
+                  GOROOT="$GOROOT_DEV" GOPATH="$GOPATH_DEV" PATH="$PATH_GO_DEV" setarch i386 cmake -DCMAKE_CXX_FLAGS="$CXXFLAGS -fno-sanitize=vptr" -DCMAKE_C_FLAGS="$CFLAGS -fno-sanitize=vptr" -DBORINGSSL_ALLOW_CXX_RUNTIME=1 -DCMAKE_ASM_FLAGS="-m32" ..
+              else
+                  GOROOT="$GOROOT_DEV" GOPATH="$GOPATH_DEV" PATH="$PATH_GO_DEV" cmake -DCMAKE_CXX_FLAGS="$CXXFLAGS -fno-sanitize=vptr" -DCMAKE_C_FLAGS="$CFLAGS -fno-sanitize=vptr" -DBORINGSSL_ALLOW_CXX_RUNTIME=1 ..
+              fi
+              make -j$(nproc) crypto
+              cd /tmp/src/cryptofuzz/modules/openssl
+              OPENSSL_INCLUDE_PATH="/tmp/src/boringssl/include" OPENSSL_LIBCRYPTO_A_PATH="/tmp/src/boringssl/build/crypto/libcrypto.a" CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_BORINGSSL" make -B
+              cd /tmp/src/cryptofuzz
+              LIBFUZZER_LINK="$LIB_FUZZING_ENGINE" CXXFLAGS="$CXXFLAGS -I /tmp/src/openssl/include $INCLUDE_PATH_FLAGS" make -B -j$(nproc)
+              ./generate_dict
+              if [ "$SANITIZER" = undefined ]; then
+                  patchelf --set-rpath '$ORIGIN/lib/jdk-18.0.1/lib/server/' /tmp/src/cryptofuzz/cryptofuzz
+              fi
+              cp /tmp/src/cryptofuzz/cryptofuzz $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-boringssl
+              cp /tmp/src/cryptofuzz/cryptofuzz-dict.txt $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-boringssl.dict
+              cp /tmp/src/cryptofuzz-corpora/boringssl_latest.zip $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-boringssl_seed_corpus.zip
+          fi
+          cd /tmp/src/cryptofuzz/modules/libgmp
+          make -B -f Makefile-mini-gmp
+          cd /tmp/src/boringssl
+          rm -rf build ; mkdir build
+          cd build
+          GOROOT="$GOROOT_DEV" GOPATH="$GOPATH_DEV" PATH="$PATH_GO_DEV" cmake -DCMAKE_CXX_FLAGS="$CXXFLAGS -fno-sanitize=vptr" -DCMAKE_C_FLAGS="$CFLAGS -fno-sanitize=vptr" -DBORINGSSL_ALLOW_CXX_RUNTIME=1 -DOPENSSL_NO_ASM=1 ..
+          make -j$(nproc) crypto
+          cd /tmp/src/cryptofuzz/modules/openssl
+          OPENSSL_INCLUDE_PATH="/tmp/src/boringssl/include" OPENSSL_LIBCRYPTO_A_PATH="/tmp/src/boringssl/build/crypto/libcrypto.a" CXXFLAGS="$CXXFLAGS -DCRYPTOFUZZ_BORINGSSL" make -B
+          cd /tmp/src/cryptofuzz
+          LIBFUZZER_LINK="$LIB_FUZZING_ENGINE" CXXFLAGS="$CXXFLAGS -I /tmp/src/openssl/include $INCLUDE_PATH_FLAGS" make -B -j$(nproc)
+          ./generate_dict
+          if [ "$SANITIZER" = undefined ]; then
+              patchelf --set-rpath '$ORIGIN/lib/jdk-18.0.1/lib/server/' /tmp/src/cryptofuzz/cryptofuzz
+          fi
+          cp /tmp/src/cryptofuzz/cryptofuzz $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-boringssl-noasm
+          cp /tmp/src/cryptofuzz/cryptofuzz-dict.txt $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-boringssl-noasm.dict
+          cp /tmp/src/cryptofuzz-corpora/boringssl_latest.zip $GITHUB_WORKSPACE/build/fuzz-targets/cryptofuzz-boringssl-noasm_seed_corpus.zip
+          set -e
+          # Verify at least one fuzz target was built
+          target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
+          echo "[+] Built $target_count fuzz targets"
+          if [ "$target_count" -eq 0 ]; then
+            echo "[!] No fuzz targets built — build failed"
+            exit 1
+          fi
+
+      - name: Verify fuzz targets
+        run: |
+          echo "[+] Built targets:"
+          ls -la build/fuzz-targets/ 2>/dev/null || echo "No targets built"
+          find build/fuzz-targets/ -type f -executable 2>/dev/null | head -20
+
+      - name: Upload built fuzz targets
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: build/fuzz-targets/
+          retention-days: 1
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find seeds/${{ env.PROJECT }}/ -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la seeds/${{ env.PROJECT }}/ 2>/dev/null | head -20
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Download fuzz targets
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-targets-${{ env.PROJECT }}
+          path: fuzz-targets/
+
+      - name: Fix permissions
+        run: chmod +x fuzz-targets/*
+
+      - name: Run dry run (replay seeds)
+        run: |
+          bash scripts/dry_run.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/
+
+      - name: Run fuzzing
+        run: |
+          FUZZ_DURATION=${{ env.FUZZ_DURATION }} \
+          bash scripts/fuzz.sh \
+            fuzz-targets/ \
+            seeds/${{ env.PROJECT }}/ \
+            results/dry_run/ \
+            results/fuzz/
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

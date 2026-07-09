@@ -57,6 +57,7 @@ jobs:
           export CXX=afl-c++
           export CFLAGS="${CFLAGS:-} -fsanitize=address"
           export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export ASAN_OPTIONS=detect_leaks=0
           export CCACHE_DISABLE=1
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets

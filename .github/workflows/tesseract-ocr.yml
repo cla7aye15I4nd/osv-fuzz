@@ -35,7 +35,7 @@ jobs:
             automake \
             libarchive-dev \
             libcurl4-openssl-dev \
-            liblept-dev \
+            libleptonica-dev \
             libpango1.0-dev \
             libtiff-dev \
             libtool \

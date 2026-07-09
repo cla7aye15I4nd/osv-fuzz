@@ -1,4 +1,4 @@
-name: "Fuzz wpantund"
+name: "Fuzz myanmar-tools"
 
 on:
   workflow_dispatch:
@@ -7,10 +7,10 @@ on:
         description: "Fuzzing duration in seconds"
         default: "1800"
   schedule:
-    - cron: "0 18 * * 0"
+    - cron: "0 3 * * 0"
 
 env:
-  PROJECT: wpantund
+  PROJECT: myanmar-tools
   FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -31,28 +31,14 @@ jobs:
         run: |
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
-            autoconf \
-            autoconf-archive \
-            automake \
-            gdb \
-            libboost-dev \
-            libboost-all-dev \
-            libdbus-1-dev \
-            libtool \
-            pkg-config
+            libglog-dev \
+            libunwind-dev \
+            liblzma-dev
 
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/openthread/wpantund /tmp/src/wpantund
-
-      - name: Download fuzzer files from oss-fuzz
-        run: |
-          mkdir -p /tmp/src
-          # Pattern: *.options — download matching files via GitHub API
-          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/wpantund" | \
-            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.options', f['name'])]" | \
-            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          git clone --depth 1 --recursive https://github.com/google/myanmar-tools.git /tmp/src/myanmar-tools
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -74,36 +60,20 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
-          cd /tmp/src/wpantund
+          cd /tmp/src/myanmar-tools
           set +e
-          FUZZ_CFLAGS="${CFLAGS}"
-          FUZZ_CXXFLAGS="${CXXFLAGS}"
-          unset CFLAGS
-          unset CXXFLAGS
-          ./bootstrap.sh
-          ./configure                               \
-                  --enable-fuzz-targets             \
-                  --disable-shared                  \
-                  --enable-static                   \
-          		CC="${CC}"                        \
-          		CXX="${CXX}"                      \
-          		FUZZ_LIBS="${LIB_FUZZING_ENGINE}" \
-          		FUZZ_CFLAGS="${FUZZ_CFLAGS}"      \
-          		FUZZ_CXXFLAGS="${FUZZ_CXXFLAGS}"  \
-          		LDFLAGS="-lpthread"               \
-          		CXXFLAGS="-stdlib=libc++"
-          make -j$(nproc)
-          find . -name '*[-_]fuzz' -type f -exec cp -v '{}' $GITHUB_WORKSPACE/build/fuzz-targets ';'
-          find . -name '*[-_]fuzz.dict' -type f -exec cp -v '{}' $GITHUB_WORKSPACE/build/fuzz-targets ';'
-          find . -name '*[-_]fuzz.options' -type f -exec cp -v '{}' $GITHUB_WORKSPACE/build/fuzz-targets ';'
-          for f in etc/fuzz-corpus/*[-_]fuzz
-          do
-              fuzzer=$(basename $f)
-              if test -d "${f}"
-          	then zip -j $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer}_seed_corpus.zip ${f}/*
-              fi
-          done
-          find $GITHUB_WORKSPACE/build/fuzz-targets -type f > /dev/stderr
+          cd /tmp/src/myanmar-tools/clients/cpp
+          mkdir build
+          cd build
+          cmake -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+              -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+              -DCMAKE_VERBOSE_MAKEFILE:BOOL=ON ..
+          make all
+          $CXX $CXXFLAGS -std=c++11 -I../public -L. \
+              ../zawgyi_detector_fuzz_target.cpp \
+              -Wl,-Bstatic -lmyanmartools_static -lglog -lunwind -llzma -Wl,-Bdynamic \
+              -o $GITHUB_WORKSPACE/build/fuzz-targets/zawgyi_detector_fuzz_target \
+              $LIB_FUZZING_ENGINE -lstdc++
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)

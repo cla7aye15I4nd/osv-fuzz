@@ -1,4 +1,4 @@
-name: "Fuzz wpantund"
+name: "Fuzz duckdb"
 
 on:
   workflow_dispatch:
@@ -7,10 +7,10 @@ on:
         description: "Fuzzing duration in seconds"
         default: "1800"
   schedule:
-    - cron: "0 18 * * 0"
+    - cron: "0 6 * * 0"
 
 env:
-  PROJECT: wpantund
+  PROJECT: duckdb
   FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -30,29 +30,11 @@ jobs:
       - name: Install AFL++ and dependencies
         run: |
           bash scripts/setup_aflpp.sh
-          sudo apt-get install -y -qq \
-            autoconf \
-            autoconf-archive \
-            automake \
-            gdb \
-            libboost-dev \
-            libboost-all-dev \
-            libdbus-1-dev \
-            libtool \
-            pkg-config
 
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/openthread/wpantund /tmp/src/wpantund
-
-      - name: Download fuzzer files from oss-fuzz
-        run: |
-          mkdir -p /tmp/src
-          # Pattern: *.options — download matching files via GitHub API
-          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/wpantund" | \
-            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.options', f['name'])]" | \
-            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
+          git clone --depth 1 --recursive https://github.com/duckdb/duckdb /tmp/src/duckdb
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -74,36 +56,35 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
-          cd /tmp/src/wpantund
+          cd /tmp/src/duckdb
           set +e
-          FUZZ_CFLAGS="${CFLAGS}"
-          FUZZ_CXXFLAGS="${CXXFLAGS}"
-          unset CFLAGS
-          unset CXXFLAGS
-          ./bootstrap.sh
-          ./configure                               \
-                  --enable-fuzz-targets             \
-                  --disable-shared                  \
-                  --enable-static                   \
-          		CC="${CC}"                        \
-          		CXX="${CXX}"                      \
-          		FUZZ_LIBS="${LIB_FUZZING_ENGINE}" \
-          		FUZZ_CFLAGS="${FUZZ_CFLAGS}"      \
-          		FUZZ_CXXFLAGS="${FUZZ_CXXFLAGS}"  \
-          		LDFLAGS="-lpthread"               \
-          		CXXFLAGS="-stdlib=libc++"
-          make -j$(nproc)
-          find . -name '*[-_]fuzz' -type f -exec cp -v '{}' $GITHUB_WORKSPACE/build/fuzz-targets ';'
-          find . -name '*[-_]fuzz.dict' -type f -exec cp -v '{}' $GITHUB_WORKSPACE/build/fuzz-targets ';'
-          find . -name '*[-_]fuzz.options' -type f -exec cp -v '{}' $GITHUB_WORKSPACE/build/fuzz-targets ';'
-          for f in etc/fuzz-corpus/*[-_]fuzz
-          do
-              fuzzer=$(basename $f)
-              if test -d "${f}"
-          	then zip -j $GITHUB_WORKSPACE/build/fuzz-targets/${fuzzer}_seed_corpus.zip ${f}/*
-              fi
+          make relassert CRASH_ON_ASSERT=1 DISABLE_SANITIZER=1 BUILD_JSON=1
+          EXTENSION_LIBS=$(find ./build/relassert/extension/ -name "*.a")
+          THIRD_PARTY_LIBS=$(find ./build/relassert/third_party/ -name "*.a")
+          CSV_JSON_HARNESS=./test/ossfuzz/csv_json_fuzz_test.cpp
+          sed -i \
+              -e 's|#include "duckdb.hpp"|#include "duckdb.hpp"\n#include "json_extension.hpp"|' \
+              -e 's|duckdb::DuckDB db(nullptr);|duckdb::DuckDB db(nullptr);\n  db.LoadStaticExtension<duckdb::JsonExtension>();|' \
+              "${CSV_JSON_HARNESS}"
+          grep -q "LoadStaticExtension<duckdb::JsonExtension>" "${CSV_JSON_HARNESS}" || {
+              echo "ERROR: failed to patch json extension load into ${CSV_JSON_HARNESS}" >&2
+              exit 1
+          }
+          DUCKDB_LIB=$(find ./build -name "libduckdb_static.a" -print -quit)
+          if [ -z "$DUCKDB_LIB" ]; then
+              echo "ERROR: libduckdb_static.a not found. Available .a files:"
+              find ./build -name "*.a" | head -20
+              exit 1
+          fi
+          echo "[+] Found duckdb static lib at: $DUCKDB_LIB"
+          for harness in parse_fuzz_test parquet_fuzz_test csv_json_fuzz_test; do
+              $CXX $CXXFLAGS $LIB_FUZZING_ENGINE ./test/ossfuzz/${harness}.cpp \
+                  -o $GITHUB_WORKSPACE/build/fuzz-targets/${harness} -I./ -I./src/include -I./third_party/fmt/include -I./extension/json/include \
+                  -Wl,--start-group \
+                  ${DUCKDB_LIB} \
+                  ${EXTENSION_LIBS} ${THIRD_PARTY_LIBS} \
+                  -Wl,--end-group
           done
-          find $GITHUB_WORKSPACE/build/fuzz-targets -type f > /dev/stderr
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
