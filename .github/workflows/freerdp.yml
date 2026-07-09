@@ -47,6 +47,7 @@ jobs:
             libpng-dev \
             libssl-dev \
             libswresample-dev \
+            libswscale-dev \
             liburiparser-dev \
             libwayland-dev \
             libwebp-dev \
@@ -122,8 +123,8 @@ jobs:
           fi
           mkdir /tmp/src/FreeRDP/build-test
           cd /tmp/src/FreeRDP/build-test
-          cmake -DBUILD_TESTING=True ..
-          make
+          CC=clang CXX=clang++ cmake -DBUILD_TESTING=True ..
+          make -j$(nproc) || true
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)

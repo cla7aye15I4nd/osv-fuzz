@@ -53,7 +53,15 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 50 --recursive https://github.com/tarantool/tarantool /tmp/src/tarantool
-          cd /tmp/src/tarantool && git fetch --tags && cd -
+          cd /tmp/src/tarantool && git fetch --tags
+          # Create VERSION file so cmake doesn't rely on git describe
+          latest_tag=$(git tag --sort=-v:refname | head -1)
+          if [ -n "$latest_tag" ]; then
+            echo "$latest_tag" > VERSION
+          else
+            echo "3.0.0" > VERSION
+          fi
+          cd -
           rm -rf /tmp/src/tarantool/test/static 2>/dev/null || true
           git clone --depth 1 --recursive https://github.com/ligurio/tarantool-corpus /tmp/src/tarantool/test/static
 
@@ -133,6 +141,10 @@ jobs:
           )
           git config --global --add safe.directory '*'
           [[ -e build ]] && rm -rf build
+          mkdir -p build
+          # Create VERSION file so cmake doesn't need git describe
+          latest_tag=$(git tag --sort=-v:refname | head -1)
+          echo "${latest_tag:-3.0.0}" > build/VERSION
           cmake "${cmake_args[@]}" -S . -B build
           cmake --build build --target fuzzers --parallel --verbose
           cp test/static/*.dict test/static/*.options $GITHUB_WORKSPACE/build/fuzz-targets/
