@@ -115,11 +115,9 @@ jobs:
           fi
           unset AFL_NOOPT
           cd contrib/contrib-build
-          # Pre-clone dav1d to avoid "not a git repository" error in contrib build
-          if [ ! -d dav1d/.git ]; then
-              rm -rf dav1d
-              git clone --depth 1 https://code.videolan.org/videolan/dav1d.git dav1d
-          fi
+          # Pre-clone dav1d as a full git repo (not shallow) for contrib build
+          rm -rf dav1d
+          git clone https://code.videolan.org/videolan/dav1d.git dav1d
           make V=1 -j$(nproc) \
               .theora \
               .dav1d \

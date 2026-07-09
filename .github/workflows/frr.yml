@@ -57,7 +57,7 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/FRRouting/frr /tmp/src/frr
-          git clone --depth 1 --recursive https://github.com/CESNET/libyang /tmp/src/libyang
+          git clone --depth 1 --branch v2.1.148 --recursive https://github.com/CESNET/libyang /tmp/src/libyang
           git clone --depth 1 --recursive https://github.com/qlyoung/corpi /tmp/src/corpi
           git clone --depth 1 --recursive https://github.com/pytest-dev/pytest /tmp/src/pytest
 
