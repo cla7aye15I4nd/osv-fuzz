@@ -31,7 +31,7 @@ jobs:
         run: |
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
-            libglog-dev \
+            libgoogle-glog-dev \
             libunwind-dev \
             liblzma-dev
 
