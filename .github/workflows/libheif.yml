@@ -74,6 +74,8 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+          # Allow build scripts to overwrite system libraries (e.g. libjpeg.so.8)
+          sudo chmod -R a+w /usr/lib/x86_64-linux-gnu/ 2>/dev/null || true
           cd /tmp/src/libheif
           # Patch build-oss-fuzz.sh to run on GitHub Actions (non-root user)
           # - Add sudo to apt-get commands (script expects Docker root)

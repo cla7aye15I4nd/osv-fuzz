@@ -81,6 +81,9 @@ jobs:
           unset CFLAGS
           unset CXXFLAGS
           ./bootstrap.sh
+          # Use AFL_PASSTHROUGH during configure so afl-cc acts like plain
+          # clang — prevents AFL++ from breaking autoconf test programs
+          AFL_PASSTHROUGH=1 \
           ./configure                               \
                   --enable-fuzz-targets             \
                   --disable-shared                  \

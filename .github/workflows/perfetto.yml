@@ -34,7 +34,7 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://android.googlesource.com/platform/external/perfetto/ /tmp/src/perfetto
+          git clone --depth 1 --recursive --branch v49.0 https://android.googlesource.com/platform/external/perfetto/ /tmp/src/perfetto
 
       - name: Build fuzz targets with AFL++
         run: |

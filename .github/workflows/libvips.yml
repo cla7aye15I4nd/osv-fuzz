@@ -85,6 +85,10 @@ jobs:
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/libvips
+          # Patch build script to skip pdfium (not cloned, optional for fuzzing)
+          sed -i '/pdfium-latest/,/^popd/d' fuzz/oss_fuzz_build.sh
+          sed -i '/pdfium\.pc/,/^EOF/d' fuzz/oss_fuzz_build.sh
+          sed -i '/pdfium/d' fuzz/oss_fuzz_build.sh
           set +e
           ./fuzz/oss_fuzz_build.sh
           set -e

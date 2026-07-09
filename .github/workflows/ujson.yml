@@ -122,10 +122,12 @@ jobs:
 
           # Compile ujson decoder with AFL++ instrumentation
           cd /tmp/src/ultrajson
-          afl-cc $CFLAGS -c lib/ultrajsondec.c -Ilib -o /tmp/work/ultrajsondec.o
+          # Repo restructured: lib/ is now at src/ujson/lib/
+          UJSON_LIB=$(find . -name ultrajsondec.c -type f | head -1 | xargs dirname)
+          afl-cc $CFLAGS -c $UJSON_LIB/ultrajsondec.c -I$UJSON_LIB -o /tmp/work/ultrajsondec.o
 
           # Compile harness (includes stub dconv + fuzzer entry point)
-          afl-cc $CFLAGS -c /tmp/work/ujson_fuzzer.c -Ilib -o /tmp/work/ujson_fuzzer.o
+          afl-cc $CFLAGS -c /tmp/work/ujson_fuzzer.c -I$UJSON_LIB -o /tmp/work/ujson_fuzzer.o
 
           # Link into AFL++ fuzz target
           afl-cc -fsanitize=fuzzer,address \

@@ -70,13 +70,15 @@ jobs:
           git clone --depth 1 https://github.com/randombit/botan.git /tmp/src/botan
           cd /tmp/src/botan
           BOTAN_MODULES=$(<"/tmp/src/rnp/ci/botan3-pqc-modules" tr '\n' ',')
-          python3 ./configure.py --prefix=/usr --cc-bin="$CXX" --cc-abi-flags="$CXXFLAGS" \
+          # Build botan with system compiler to avoid AFL++ breaking configure tests
+          # ASAN is still applied via cc-abi-flags for coverage
+          ASAN_OPTIONS=detect_leaks=0 \
+          python3 ./configure.py --prefix=/usr --cc-bin="clang++" --cc-abi-flags="$CXXFLAGS" \
                          --unsafe-fuzzer-mode \
-                         --with-fuzzer-lib='FuzzingEngine' \
                          --minimized-build \
                          --disable-modules=locking_allocator \
                          --enable-modules="$BOTAN_MODULES"
-          make "-j$(nproc)"
+          ASAN_OPTIONS=detect_leaks=0 make "-j$(nproc)"
           sudo make install
           sudo ldconfig
           cd "/tmp/src"
