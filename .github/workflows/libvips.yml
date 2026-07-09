@@ -89,6 +89,11 @@ jobs:
           sed -i '/pdfium-latest/,/^popd/d' fuzz/oss_fuzz_build.sh
           sed -i '/pdfium\.pc/,/^EOF/d' fuzz/oss_fuzz_build.sh
           sed -i '/pdfium/d' fuzz/oss_fuzz_build.sh
+          # Replace C23 #embed directives with empty strings (unsupported by clang-17)
+          if [ -f fuzz/config.h ]; then
+            sed -i 's/#embed.*$/""/' fuzz/config.h
+            sed -i '/^ *, 0.*ensure null-terminated/d' fuzz/config.h
+          fi
           set +e
           ./fuzz/oss_fuzz_build.sh
           set -e
