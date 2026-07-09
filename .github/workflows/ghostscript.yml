@@ -46,8 +46,11 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/pdf_seeds "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/pdf_seeds"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/dicts "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/dicts"
+          mkdir -p /tmp/src/pdf_seeds /tmp/src/dicts
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/pdf_seeds/pdf.pdf "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/pdf_seeds/pdf.pdf"
+          for d in pcl.dict pdf.dict ps.dict pxl.dict xps.dict; do
+            curl -sfL --retry 3 --retry-delay 5 -o "/tmp/src/dicts/$d" "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/dicts/$d"
+          done
           curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_bmpmono_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_bmpmono_fuzzer.cc"
           curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_eps2write_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_eps2write_fuzzer.cc"
           curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_faxg3_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_faxg3_fuzzer.cc"
