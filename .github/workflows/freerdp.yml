@@ -38,6 +38,7 @@ jobs:
             git-core \
             libavcodec-dev \
             libavutil-dev \
+            libcairo2-dev \
             libcjson-dev \
             libjpeg-dev \
             libkrb5-dev \

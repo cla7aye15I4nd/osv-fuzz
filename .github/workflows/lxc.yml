@@ -77,7 +77,7 @@ jobs:
           }
           STUBEOF
           afl-cc -c /tmp/fuzzer_stub/stub.c -o /tmp/fuzzer_stub/stub.o
-          ar rcs /usr/lib/libFuzzingEngine.a /tmp/fuzzer_stub/stub.o
+          sudo ar rcs /usr/lib/libFuzzingEngine.a /tmp/fuzzer_stub/stub.o
           cd /tmp/src/lxc
           set +e
           export CFLAGS="${CFLAGS} -Wno-error=backend-plugin"
