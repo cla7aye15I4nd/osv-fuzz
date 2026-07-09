@@ -48,8 +48,10 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/targets "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/cairo/targets"
+          mkdir -p /tmp/src/targets
+          for f in common_drawing.h font_fuzzer.c fuzzer_temp_file.h multi_surface_fuzzer.c pdf_surface_fuzzer.c raster_fuzzer.c script_interpreter_fuzzer.c surface_write_png_fuzzer.c text_glyphs_fuzzer.c; do
+            curl -sfL --retry 3 --retry-delay 5 -o "/tmp/src/targets/$f" "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/cairo/targets/$f"
+          done
 
       - name: Build fuzz targets with AFL++
         run: |
