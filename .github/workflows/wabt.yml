@@ -41,13 +41,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/read_binary_interp_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/wabt/read_binary_interp_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/read_binary_ir_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/wabt/read_binary_ir_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/wasm2wat_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/wabt/wasm2wat_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/wasm_interp_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/wabt/wasm_interp_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/wasm_objdump_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/wabt/wasm_objdump_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/wat2wasm_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/wabt/wat2wasm_fuzzer.cc"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/wabt
+          cp -r /tmp/oss-fuzz/projects/wabt/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

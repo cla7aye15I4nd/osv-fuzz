@@ -42,14 +42,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_cfg_parser.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/haproxy/fuzz_cfg_parser.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_h1_htx.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/haproxy/fuzz_h1_htx.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_h1_htx.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/haproxy/fuzz_h1_htx.dict"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_h1_parse.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/haproxy/fuzz_h1_parse.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_h1_parse.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/haproxy/fuzz_h1_parse.dict"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_hpack_decode.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/haproxy/fuzz_hpack_decode.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_http.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/haproxy/fuzz_http.c"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/haproxy
+          cp -r /tmp/oss-fuzz/projects/haproxy/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

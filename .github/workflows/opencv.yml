@@ -41,17 +41,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/core_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/opencv/core_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/filestorage_read_file_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/opencv/filestorage_read_file_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/filestorage_read_filename_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/opencv/filestorage_read_filename_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/filestorage_read_string_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/opencv/filestorage_read_string_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/generateusergallerycollage_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/opencv/generateusergallerycollage_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/imdecode_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/opencv/imdecode_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/imencode_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/opencv/imencode_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/imread_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/opencv/imread_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/readnetfromtensorflow_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/opencv/readnetfromtensorflow_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzzer_temp_file.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/opencv/fuzzer_temp_file.h"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/opencv
+          cp -r /tmp/oss-fuzz/projects/opencv/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

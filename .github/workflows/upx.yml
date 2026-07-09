@@ -46,11 +46,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src/upx/fuzzers
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/upx/fuzzers/build.patch "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/upx/fuzzers/build.patch"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/upx/fuzzers/decompress_packed_file_fuzzer.cpp "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/upx/fuzzers/decompress_packed_file_fuzzer.cpp"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/upx/fuzzers/list_packed_file_fuzzer.cpp "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/upx/fuzzers/list_packed_file_fuzzer.cpp"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/upx/fuzzers/test_packed_file_fuzzer.cpp "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/upx/fuzzers/test_packed_file_fuzzer.cpp"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/upx
+          cp -r /tmp/oss-fuzz/projects/upx/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

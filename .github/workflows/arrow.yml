@@ -43,9 +43,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/replay_build.sh "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/arrow/replay_build.sh"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/run_tests.sh "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/arrow/run_tests.sh"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/arrow
+          cp -r /tmp/oss-fuzz/projects/arrow/* /tmp/src/
 
       - name: Build Boost from source
         run: |

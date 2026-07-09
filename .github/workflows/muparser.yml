@@ -44,9 +44,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/c_api_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/muparser/c_api_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/set_eval_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/muparser/set_eval_fuzzer.cc"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/muparser
+          cp -r /tmp/oss-fuzz/projects/muparser/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

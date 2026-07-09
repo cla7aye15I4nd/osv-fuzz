@@ -38,23 +38,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_graph_graphml_fuzzer_seed_corpus.zip "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_graph_graphml_fuzzer_seed_corpus.zip"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_graph_graphviz_fuzzer_seed_corpus.zip "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_graph_graphviz_fuzzer_seed_corpus.zip"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_datetime_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_datetime_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_filesystem_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_filesystem_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_graph_graphml_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_graph_graphml_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_graph_graphviz_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_graph_graphviz_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_programoptions_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_programoptions_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_ptree_inforead_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_ptree_inforead_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_ptree_iniread_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_ptree_iniread_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_ptree_jsonread_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_ptree_jsonread_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_ptree_xmlread_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_ptree_xmlread_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_regex_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_regex_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_regex_pattern_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_regex_pattern_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_regex_replace_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_regex_replace_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_stralg_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_stralg_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/boost_uuid_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/boost/boost_uuid_fuzzer.cc"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/boost
+          cp -r /tmp/oss-fuzz/projects/boost/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

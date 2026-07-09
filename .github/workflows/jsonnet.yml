@@ -40,10 +40,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/convert_jsonnet_fuzzer_multi.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/jsonnet/convert_jsonnet_fuzzer_multi.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/convert_jsonnet_fuzzer_regular.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/jsonnet/convert_jsonnet_fuzzer_regular.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/convert_jsonnet_fuzzer_stream.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/jsonnet/convert_jsonnet_fuzzer_stream.cc"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/jsonnet
+          cp -r /tmp/oss-fuzz/projects/jsonnet/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

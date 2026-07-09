@@ -45,9 +45,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/run_tests.sh "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/pcapplusplus/run_tests.sh"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/pcapplusplus_enable_tests.diff "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/pcapplusplus/pcapplusplus_enable_tests.diff"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/pcapplusplus
+          cp -r /tmp/oss-fuzz/projects/pcapplusplus/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

@@ -47,11 +47,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzzer_temp_file.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/fuzzer_temp_file.h"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/magic_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/magic_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/magic_fuzzer_loaddb.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/magic_fuzzer_loaddb.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/magic_fuzzer_fd.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/file/magic_fuzzer_fd.cc"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/file
+          cp -r /tmp/oss-fuzz/projects/file/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

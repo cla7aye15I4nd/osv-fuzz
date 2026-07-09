@@ -44,9 +44,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/compile_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/glslang/compile_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/run_tests.sh "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/glslang/run_tests.sh"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/glslang
+          cp -r /tmp/oss-fuzz/projects/glslang/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

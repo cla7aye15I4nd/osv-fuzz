@@ -47,15 +47,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_header.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/vulkan-loader/fuzzers/fuzz_header.h"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/instance_create_advanced_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/vulkan-loader/fuzzers/instance_create_advanced_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/instance_create_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/vulkan-loader/fuzzers/instance_create_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/instance_enumerate_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/vulkan-loader/fuzzers/instance_enumerate_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/json_load_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/vulkan-loader/fuzzers/json_load_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/settings_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/vulkan-loader/fuzzers/settings_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/vulkan-keywords.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/vulkan-loader/vulkan-keywords.dict"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz-patch.diff "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/vulkan-loader/fuzz-patch.diff"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/vulkan-loader
+          cp -r /tmp/oss-fuzz/projects/vulkan-loader/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

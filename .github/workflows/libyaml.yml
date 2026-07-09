@@ -42,19 +42,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/yaml_write_handler.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/yaml_write_handler.h"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/libyaml_deconstructor_alt_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/libyaml_deconstructor_alt_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/libyaml_deconstructor_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/libyaml_deconstructor_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/libyaml_dumper_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/libyaml_dumper_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/libyaml_emitter_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/libyaml_emitter_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/libyaml_loader_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/libyaml_loader_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/libyaml_parser_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/libyaml_parser_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/libyaml_reformatter_alt_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/libyaml_reformatter_alt_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/libyaml_reformatter_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/libyaml_reformatter_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/libyaml_scanner_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/libyaml_scanner_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/libyaml_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/libyaml_fuzzer.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/yaml.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libyaml/yaml.dict"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/libyaml
+          cp -r /tmp/oss-fuzz/projects/libyaml/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

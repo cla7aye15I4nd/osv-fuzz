@@ -44,9 +44,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/ucl_add_string_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libucl/ucl_add_string_fuzzer.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/ucl_msgpack_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libucl/ucl_msgpack_fuzzer.options"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/libucl
+          cp -r /tmp/oss-fuzz/projects/libucl/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

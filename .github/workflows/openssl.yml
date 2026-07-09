@@ -43,10 +43,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/bignum.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openssl/bignum.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/quic-srtm.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openssl/quic-srtm.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/replay_build.sh "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openssl/replay_build.sh"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/openssl
+          cp -r /tmp/oss-fuzz/projects/openssl/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

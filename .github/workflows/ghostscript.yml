@@ -45,41 +45,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          mkdir -p /tmp/src/pdf_seeds /tmp/src/dicts
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/pdf_seeds/pdf.pdf "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/pdf_seeds/pdf.pdf"
-          for d in pcl.dict pdf.dict ps.dict pxl.dict xps.dict; do
-            curl -sfL --retry 3 --retry-delay 5 -o "/tmp/src/dicts/$d" "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/dicts/$d"
-          done
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_bmpmono_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_bmpmono_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_eps2write_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_eps2write_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_faxg3_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_faxg3_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_ljet4_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_ljet4_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_pdfwrite_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_pdfwrite_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_pdfwrite_opts_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_pdfwrite_opts_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_pgmraw_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_pgmraw_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_png16m_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_png16m_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_ps2write_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_ps2write_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_psdcmyk_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_psdcmyk_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_pxlcolor_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_pxlcolor_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_pxlmono_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_pxlmono_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_tiffsep1_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_tiffsep1_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_device_xpswrite_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_device_xpswrite_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_icc_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_icc_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_pcl_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_pcl_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_pxl_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_pxl_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_xps_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_xps_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gstoraster_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gstoraster_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gstoraster_fuzzer_all_colors.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gstoraster_fuzzer_all_colors.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gstoraster_pdf_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gstoraster_pdf_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gstoraster_ps_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gstoraster_ps_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_pcl_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_pcl_fuzzer.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_pxl_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_pxl_fuzzer.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_xps_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_xps_fuzzer.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gstoraster_fuzzer_all_colors.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gstoraster_fuzzer_all_colors.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gstoraster_ps_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gstoraster_ps_fuzzer.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/gs_fuzzlib.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/gs_fuzzlib.h"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/generate_seeds.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ghostscript/generate_seeds.py"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/ghostscript
+          cp -r /tmp/oss-fuzz/projects/ghostscript/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

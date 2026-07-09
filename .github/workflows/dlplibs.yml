@@ -63,20 +63,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          # Download source tarballs (normally provided by oss-fuzz Dockerfile)
-          wget -q -P /tmp/src \
-            https://dev-www.libreoffice.org/src/zlib-1.3.2.tar.xz \
-            https://dev-www.libreoffice.org/src/lcms2-2.18.tar.gz \
-            https://dev-www.libreoffice.org/src/libpng-1.6.56.tar.xz \
-            https://dev-www.libreoffice.org/src/libxml2-2.14.6.tar.xz \
-            https://dev-www.libreoffice.org/src/icu4c-78.2-sources.tgz \
-            https://dev-www.libreoffice.org/src/mdds-3.1.0.tar.xz
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/abwfuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dlplibs/abwfuzzer.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fb2fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dlplibs/fb2fuzzer.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/vdxfuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dlplibs/vdxfuzzer.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/vsdxfuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dlplibs/vsdxfuzzer.options"
-
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/dlplibs
+          cp -r /tmp/oss-fuzz/projects/dlplibs/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

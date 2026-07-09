@@ -49,8 +49,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/libass_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libass/libass_fuzzer.options"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/libass
+          cp -r /tmp/oss-fuzz/projects/libass/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

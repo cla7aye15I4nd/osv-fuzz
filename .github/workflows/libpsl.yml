@@ -55,9 +55,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/config.site "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libpsl/config.site"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/md5sum "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libpsl/md5sum"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/libpsl
+          cp -r /tmp/oss-fuzz/projects/libpsl/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

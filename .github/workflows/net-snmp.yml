@@ -38,8 +38,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/mib.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/net-snmp/mib.dict"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/net-snmp
+          cp -r /tmp/oss-fuzz/projects/net-snmp/* /tmp/src/
 
       - name: Install net-snmp build dependencies
         run: sudo apt-get update && sudo apt-get install -y libnl-3-dev libnl-route-3-dev

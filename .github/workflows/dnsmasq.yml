@@ -42,14 +42,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_auth.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dnsmasq/fuzz_auth.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_dhcp.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dnsmasq/fuzz_dhcp.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_dhcp6.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dnsmasq/fuzz_dhcp6.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_rfc1035.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dnsmasq/fuzz_rfc1035.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_util.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dnsmasq/fuzz_util.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_header.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dnsmasq/fuzz_header.h"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_patch.patch "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dnsmasq/fuzz_patch.patch"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/dnsmasq
+          cp -r /tmp/oss-fuzz/projects/dnsmasq/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

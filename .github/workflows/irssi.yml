@@ -44,9 +44,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/irssi-fuzz.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/irssi/irssi-fuzz.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/theme-load-fuzz.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/irssi/theme-load-fuzz.dict"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/irssi
+          cp -r /tmp/oss-fuzz/projects/irssi/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

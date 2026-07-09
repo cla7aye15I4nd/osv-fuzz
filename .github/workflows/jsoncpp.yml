@@ -48,11 +48,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/json.proto "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/jsoncpp/json.proto"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/json_proto_converter.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/jsoncpp/json_proto_converter.h"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/json_proto_converter.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/jsoncpp/json_proto_converter.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/jsoncpp_fuzz_proto.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/jsoncpp/jsoncpp_fuzz_proto.cc"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/jsoncpp
+          cp -r /tmp/oss-fuzz/projects/jsoncpp/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

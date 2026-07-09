@@ -57,14 +57,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_addr_parse.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/apache-httpd/fuzz_addr_parse.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_parse.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/apache-httpd/fuzz_parse.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_preq.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/apache-httpd/fuzz_preq.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_request.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/apache-httpd/fuzz_request.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_tokenize.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/apache-httpd/fuzz_tokenize.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_uri.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/apache-httpd/fuzz_uri.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_utils.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/apache-httpd/fuzz_utils.c"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/apache-httpd
+          cp -r /tmp/oss-fuzz/projects/apache-httpd/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

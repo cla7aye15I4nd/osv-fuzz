@@ -54,13 +54,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/run_tests.sh "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/bluez/run_tests.sh"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_gobex.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/bluez/fuzz_gobex.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_hci.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/bluez/fuzz_hci.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_sdp.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/bluez/fuzz_sdp.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_textfile.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/bluez/fuzz_textfile.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_xml.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/bluez/fuzz_xml.c"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/bluez
+          cp -r /tmp/oss-fuzz/projects/bluez/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

@@ -42,26 +42,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cmsIT8_load_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cmsIT8_load_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_cgats_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_cgats_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_cie_cam02_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_cie_cam02_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_devicelink_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_devicelink_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_dict_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_dict_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_gdb_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_gdb_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_md5_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_md5_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_overwrite_transform_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_overwrite_transform_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_postscript_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_postscript_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_profile_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_profile_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_transform_all_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_transform_all_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_transform_extended_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_transform_extended_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_transform_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_transform_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_universal_transform_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_universal_transform_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_virtual_profile_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_virtual_profile_fuzzer.c"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cmsIT8_load_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cmsIT8_load_fuzzer.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_overwrite_transform_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_overwrite_transform_fuzzer.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/cms_transform_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/cms_transform_fuzzer.options"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/icc.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/lcms/icc.dict"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/lcms
+          cp -r /tmp/oss-fuzz/projects/lcms/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |

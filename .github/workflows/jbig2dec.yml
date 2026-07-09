@@ -44,10 +44,9 @@ jobs:
 
       - name: Download fuzzer files from oss-fuzz
         run: |
-          mkdir -p /tmp/src
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/jbig2_fuzzer.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/jbig2dec/jbig2_fuzzer.dict"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/jbig2_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/jbig2dec/jbig2_fuzzer.cc"
-          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/jbig2_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/jbig2dec/jbig2_fuzzer.options"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
+          cd /tmp/oss-fuzz && git sparse-checkout set projects/jbig2dec
+          cp -r /tmp/oss-fuzz/projects/jbig2dec/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |
