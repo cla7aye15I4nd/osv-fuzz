@@ -41,7 +41,7 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/vpx_dec_fuzzer.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libvpx/vpx_dec_fuzzer.dict"
+          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/vpx_dec_fuzzer.dict "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libvpx/vpx_dec_fuzzer.dict"
 
       - name: Build fuzz targets with AFL++
         run: |

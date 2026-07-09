@@ -42,13 +42,13 @@ jobs:
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://code.videolan.org/videolan/dav1d.git /tmp/src/dav1d
           git clone --depth 1 --recursive https://code.videolan.org/videolan/dav1d-test-data.git /tmp/src/dav1d/tests/dav1d-test-data
-          curl -sL -o /tmp/src/dec_fuzzer_seed_corpus.zip https://storage.googleapis.com/aom-test-data/fuzzer/dec_fuzzer_seed_corpus.zip
-          curl -sL -o /tmp/src/dav1d_fuzzer_seed_corpus.zip https://download.videolan.org/contrib/dav1d/dav1d_fuzzer_seed_corpus.zip
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/dec_fuzzer_seed_corpus.zip https://storage.googleapis.com/aom-test-data/fuzzer/dec_fuzzer_seed_corpus.zip
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/dav1d_fuzzer_seed_corpus.zip https://download.videolan.org/contrib/dav1d/dav1d_fuzzer_seed_corpus.zip
 
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/linux32.meson "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dav1d/linux32.meson"
+          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/linux32.meson "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/dav1d/linux32.meson"
 
       - name: Build fuzz targets with AFL++
         run: |

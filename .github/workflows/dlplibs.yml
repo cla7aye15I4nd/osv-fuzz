@@ -73,13 +73,13 @@ jobs:
             https://dev-www.libreoffice.org/src/icu4c-78.2-sources.tgz \
             https://dev-www.libreoffice.org/src/mdds-3.1.0.tar.xz
           # Pattern: *.options — download matching files via GitHub API
-          curl -sL -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/dlplibs" | \
+          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/dlplibs" | \
             python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.options', f['name'])]" | \
-            while read url; do curl -sL -H "Authorization: token $GITHUB_TOKEN" -O --output-dir /tmp/src "$url"; done
+            while read url; do curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -O --output-dir /tmp/src "$url"; done
           # Pattern: *.patch — download matching files via GitHub API
-          curl -sL -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/dlplibs" | \
+          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/dlplibs" | \
             python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.patch', f['name'])]" | \
-            while read url; do curl -sL -H "Authorization: token $GITHUB_TOKEN" -O --output-dir /tmp/src "$url"; done
+            while read url; do curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -O --output-dir /tmp/src "$url"; done
 
       - name: Build fuzz targets with AFL++
         run: |

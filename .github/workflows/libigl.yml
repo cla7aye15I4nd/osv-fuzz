@@ -43,7 +43,7 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          curl -sL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/igl_fuzzer.cpp "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libigl/igl_fuzzer.cpp"
+          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" -o /tmp/src/igl_fuzzer.cpp "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/libigl/igl_fuzzer.cpp"
 
       - name: Build fuzz targets with AFL++
         run: |
