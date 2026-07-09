@@ -99,6 +99,9 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+          # Replace static libm with empty stub to avoid IFUNC errors on glibc 2.39+
+          sudo rm -f /usr/lib/x86_64-linux-gnu/libm.a /usr/lib/x86_64-linux-gnu/libm-2.39.a
+          echo '!<arch>' | sudo tee /usr/lib/x86_64-linux-gnu/libm.a > /dev/null
           cd /tmp/src/tarantool
           set +e
           [[ -e /tmp/src/tarantool/build ]] && rm -rf /tmp/src/tarantool/build
