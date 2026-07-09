@@ -56,8 +56,8 @@ jobs:
           cd /tmp/src/tarantool
           git fetch --tags
           git submodule update --init --recursive --depth 1 || true
-          # Create a tag at HEAD so git describe works in shallow clone
-          git tag -f v99.0.0-fuzz HEAD
+          # Create an annotated tag at HEAD so git describe works in shallow clone
+          git tag -a -f -m "fuzz build" v99.0.0-fuzz HEAD
           cd -
           rm -rf /tmp/src/tarantool/test/static 2>/dev/null || true
           git clone --depth 1 --recursive https://github.com/ligurio/tarantool-corpus /tmp/src/tarantool/test/static
