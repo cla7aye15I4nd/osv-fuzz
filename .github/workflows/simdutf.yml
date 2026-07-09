@@ -41,10 +41,6 @@ jobs:
       - name: Build fuzz targets with AFL++
         run: |
           mkdir -p build/fuzz-targets /tmp/work
-          export CC=afl-cc
-          export CXX=afl-c++
-          export CFLAGS="${CFLAGS:-} -O1 -fsanitize=address"
-          export CXXFLAGS="${CXXFLAGS:-} -O1 -fsanitize=address"
           export FUZZING_ENGINE=afl
           export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
           export SANITIZER=address
@@ -59,8 +55,40 @@ jobs:
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/simdutf
+          # Phase 1: Build the simdutf library with plain clang (no AFL++).
+          # The AFL++ SanitizerCoverage plugin triggers an LLVM 17 backend crash
+          # ("Cannot emit physreg copy instruction") on simdutf's AVX-512/icelake
+          # code. Building the library without AFL++ instrumentation avoids this.
+          # ASan is still enabled for runtime bug detection.
+          cmake -B build -S . \
+              -DCMAKE_C_COMPILER=clang \
+              -DCMAKE_CXX_COMPILER=clang++ \
+              -DCMAKE_C_FLAGS="-O1 -fsanitize=address -fPIC" \
+              -DCMAKE_CXX_FLAGS="-O1 -fsanitize=address -fPIC" \
+              -DSIMDUTF_TESTS=Off \
+              -DSIMDUTF_TOOLS=Off \
+              -DSIMDUTF_FUZZERS=Off \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSIMDUTF_CXX_STANDARD=20 \
+              -DSIMDUTF_ALWAYS_INCLUDE_FALLBACK=On
+          cmake --build build -j$(nproc)
+          cmake --install build --prefix $WORK
+          # Phase 2: Build fuzz harnesses with afl-c++ for AFL++ coverage.
+          # Only the harness code is instrumented; the library is uninstrumented
+          # but still has ASan.
           set +e
-          fuzz/build.sh
+          for fuzzersrc in fuzz/*.cpp; do
+              fuzzer=$(basename "$fuzzersrc" .cpp)
+              # Skip non-fuzzer files (reproducer, main, atomic helpers)
+              case "$fuzzer" in reproducer*|main|atomic*) continue ;; esac
+              echo "[+] Building fuzzer: $fuzzer"
+              afl-c++ -O1 -fsanitize=address -std=c++20 \
+                  -I "$WORK/include" \
+                  -c "$fuzzersrc" -o "${fuzzer}.o"
+              afl-c++ -O1 -fsanitize=address,fuzzer \
+                  "${fuzzer}.o" "$WORK/lib/libsimdutf.a" \
+                  -o "$OUT/${fuzzer}"
+          done
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)

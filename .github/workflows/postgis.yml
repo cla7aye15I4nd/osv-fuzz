@@ -30,11 +30,11 @@ jobs:
       - name: Install AFL++ and dependencies
         run: |
           bash scripts/setup_aflpp.sh
+          sudo apt-get update -qq
           sudo apt-get install -y -qq \
             libgmp-dev \
             libgeos-dev \
             libproj-dev \
-            libgdal-dev \
             postgresql-server-dev-all
 
       - name: Clone source

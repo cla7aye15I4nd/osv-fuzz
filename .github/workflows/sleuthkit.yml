@@ -65,8 +65,9 @@ jobs:
           set +e
           # Work around -all-static flag (see sleuthkit issue #3020)
           sed -i 's/-all-static//g' configure.ac
-          # Work around hardcoded -Werror flags (see sleuthkit issue #3012)
-          sed -i 's/-Werror//g' Makefile.am
+          # Work around hardcoded -Werror flags — the flag lives in
+          # tsk/pool/Makefile.am (not the root), so strip it recursively
+          find . -name Makefile.am -exec sed -i 's/-Werror//g' {} +
           # Download seed corpora (non-fatal if some downloads fail)
           if [ -x ./ossfuzz/buildcorpus.sh ]; then
               ./ossfuzz/buildcorpus.sh || true
@@ -85,10 +86,24 @@ jobs:
               --disable-java --without-afflib --without-libcrypto \
               --without-libewf --without-libvhdi --without-libvmdk
           make -j$(nproc)
-          # Copy fuzzer binaries — they may be in root, ossfuzz/, or .libs/
-          find . -name '*_fuzzer' -type f -executable -exec cp {} "$OUT/" \;
-          # Also check .libs directories for libtool-wrapped binaries
-          find . -path '*/.libs/*_fuzzer' -type f -executable -exec cp {} "$OUT/" \; 2>/dev/null || true
+          # The autotools build does not compile the fuzzer targets (ossfuzz/
+          # is not in SUBDIRS). Build them manually against libtsk.
+          echo "[+] Building fuzzer targets from ossfuzz/"
+          for fuzzer_src in ossfuzz/*_fuzzer.cpp; do
+              if [ -f "$fuzzer_src" ]; then
+                  name=$(basename "$fuzzer_src" .cpp)
+                  echo "  -> $name"
+                  $CXX $CXXFLAGS -std=c++14 -DHAVE_CONFIG_H -I. -I./tsk \
+                      -c "$fuzzer_src" -o "ossfuzz/${name}.o"
+                  $CXX $CXXFLAGS $LIB_FUZZING_ENGINE \
+                      "ossfuzz/${name}.o" tsk/.libs/libtsk.a \
+                      -lz -lsqlite3 -ldl -lstdc++ -lm \
+                      -o "$OUT/${name}"
+              fi
+          done
+          # Also check for any fuzzers the autotools build may have produced
+          find . -name '*_fuzzer' -type f -executable -not -path './ossfuzz/*' \
+              -exec cp {} "$OUT/" \; 2>/dev/null || true
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)

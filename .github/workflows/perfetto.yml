@@ -56,6 +56,42 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+          # Create libFuzzingEngine.a — perfetto's build_fuzzers hardcodes
+          # link_fuzzer="-lFuzzingEngine" in GN args, expecting this library to
+          # exist. In oss-fuzz Docker it's pre-installed; here we provide a stub
+          # that reads from file/stdin and calls LLVMFuzzerTestOneInput.
+          cat > /tmp/fuzzer_driver.c << 'FUZZEOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          extern int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+          __attribute__((weak)) int LLVMFuzzerInitialize(int *argc, char ***argv) {
+              (void)argc; (void)argv; return 0;
+          }
+          int main(int argc, char **argv) {
+              LLVMFuzzerInitialize(&argc, &argv);
+              unsigned char *buf = NULL;
+              size_t len = 0;
+              FILE *f = (argc > 1) ? fopen(argv[1], "rb") : stdin;
+              if (!f) return 1;
+              fseek(f, 0, SEEK_END);
+              len = (size_t)ftell(f);
+              fseek(f, 0, SEEK_SET);
+              if (len == 0 || len == (size_t)-1) {
+                  /* stdin or empty file — read into fixed buffer */
+                  buf = (unsigned char *)malloc(1024*1024);
+                  len = fread(buf, 1, 1024*1024, f);
+              } else {
+                  buf = (unsigned char *)malloc(len);
+                  fread(buf, 1, len, f);
+              }
+              if (argc > 1) fclose(f);
+              int ret = LLVMFuzzerTestOneInput(buf, len);
+              free(buf);
+              return ret;
+          }
+          FUZZEOF
+          afl-cc -c /tmp/fuzzer_driver.c -o /tmp/fuzzer_driver.o
+          sudo ar rcs /usr/lib/libFuzzingEngine.a /tmp/fuzzer_driver.o
           cd /tmp/src/perfetto
           set +e
           export CFLAGS="$CFLAGS -Wno-extra-semi-stmt"

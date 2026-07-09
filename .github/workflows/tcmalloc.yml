@@ -97,7 +97,7 @@ jobs:
           LEOF
           chmod +x /tmp/rules_fuzzing_oss_fuzz/oss_fuzz_launcher.sh
 
-          export BAZEL_EXTRA_BUILD_FLAGS="--override_repository=rules_fuzzing_oss_fuzz=/tmp/rules_fuzzing_oss_fuzz"
+          export BAZEL_EXTRA_BUILD_FLAGS="--inject_repository=rules_fuzzing_oss_fuzz=/tmp/rules_fuzzing_oss_fuzz"
 
           cd /tmp/src/tcmalloc
           set +e

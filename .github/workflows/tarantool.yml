@@ -53,6 +53,7 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/tarantool/tarantool /tmp/src/tarantool
+          cd /tmp/src/tarantool && git fetch --depth 1 --tags && cd -
           rm -rf /tmp/src/tarantool/test/static 2>/dev/null || true
           git clone --depth 1 --recursive https://github.com/ligurio/tarantool-corpus /tmp/src/tarantool/test/static
 
