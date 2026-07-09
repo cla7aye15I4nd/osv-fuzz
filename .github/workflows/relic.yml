@@ -40,7 +40,8 @@ jobs:
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/relic-toolkit/relic.git /tmp/src/relic
           git clone --depth 1 --recursive https://github.com/randombit/botan.git /tmp/src/botan
-          git clone --depth 1 --recursive https://github.com/MozillaSecurity/cryptofuzz /tmp/src/cryptofuzz
+          git clone --depth 1 --no-recurse-submodules https://github.com/MozillaSecurity/cryptofuzz /tmp/src/cryptofuzz
+          cd /tmp/src && wget -q https://archives.boost.io/release/1.84.0/source/boost_1_84_0.tar.bz2
 
       - name: Build fuzz targets with AFL++
         run: |

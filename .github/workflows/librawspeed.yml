@@ -32,7 +32,9 @@ jobs:
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
             cmake \
-            ninja-build
+            ninja-build \
+            lld \
+            wget
 
       - name: Clone source
         run: |
@@ -66,6 +68,11 @@ jobs:
           # Create apt-get shim so oss-fuzz.sh's bare apt-get calls use sudo
           printf '#!/bin/sh\nexec sudo /usr/bin/apt-get "$@"\n' > /usr/local/bin/apt-get
           chmod +x /usr/local/bin/apt-get
+          # Set up lld where oss-fuzz.sh expects it (/usr/local/bin/lld)
+          sudo ln -f -s "$(which lld)" /usr/local/bin/lld 2>/dev/null || true
+          sudo ln -f -s /usr/local/bin/lld /usr/bin/ld
+          # Patch oss-fuzz.sh: its ln command needs sudo on GitHub Actions (not running as root)
+          sed -i 's|ln -f -s /usr/local/bin/lld /usr/bin/ld|sudo ln -f -s /usr/local/bin/lld /usr/bin/ld|' /tmp/src/librawspeed/.ci/oss-fuzz.sh
           /tmp/src/librawspeed/.ci/oss-fuzz.sh
           set -e
           # Verify at least one fuzz target was built

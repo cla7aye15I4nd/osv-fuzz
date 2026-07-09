@@ -46,7 +46,7 @@ jobs:
           mkdir -p build/fuzz-targets /tmp/work
           export CC=afl-cc
           export CXX=afl-c++
-          export CFLAGS="${CFLAGS:-} -fsanitize=address"
+          export CFLAGS="${CFLAGS:-} -fsanitize=address -Wno-error=implicit-function-declaration"
           export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
           export FUZZING_ENGINE=afl
           export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"

@@ -53,7 +53,8 @@ jobs:
         run: |
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/tarantool/tarantool /tmp/src/tarantool
-          git clone --depth 1 --recursive https://github.com/ligurio/tarantool-corpus /tmp/src/test/static
+          rm -rf /tmp/src/tarantool/test/static 2>/dev/null || true
+          git clone --depth 1 --recursive https://github.com/ligurio/tarantool-corpus /tmp/src/tarantool/test/static
 
       - name: Download fuzzer files from oss-fuzz
         run: |
@@ -145,40 +146,39 @@ jobs:
               zip --quiet -j $GITHUB_WORKSPACE/build/fuzz-targets/"$name"_seed_corpus.zip $corpus_dir/*
             fi
           done
-          if [[ "$FUZZING_ENGINE" != libfuzzer ]] ||
-             [[ "$SANITIZER" == "coverage" ]]; then
-            exit
-          fi
-          cmake --build build --target tarantool --parallel --verbose
-          LUA_RUNTIME_NAME=tarantool
-          TARANTOOL_PATH=build/src/$LUA_RUNTIME_NAME
-          LUA_MODULES_DIR=lua_modules
-          apt install -y luarocks
-          LUA_LIBRARIES=$(realpath build/third_party/luajit/src/libluajit.a)
-          LUA_INCLUDE_DIR=$(realpath third_party/luajit/src)
-          luarocks install --lua-version 5.1 --server=https://luarocks.org/dev --tree=$LUA_MODULES_DIR luzer LUA_LIBRARIES="$LUA_LIBRARIES" LUA_INCLUDE_DIR="$LUA_INCLUDE_DIR" OSS_FUZZ=ON ENABLE_LUAJIT=ON LUAJIT_FRIENDLY_MODE=ON
-          lua_lib_path="build/test/fuzz/lua-tests/src/tests/lapi/lib*.lua"
-          if [ -f $lua_lib_path ]; then
-              cp $lua_lib_path $GITHUB_WORKSPACE/build/fuzz-targets
-          fi
-          LUZER_TEST_DIR="build/luzer_tests"
-          cmake --build build --parallel --verbose --target copy_tests
-          for test_path in $(find $LUZER_TEST_DIR -name "*.lua" -type f);
-          do
-            test_file=$(basename $test_path);
-            test_name_we="${test_file%.*}";
-            module_name=$(echo $test_name_we | sed 's/_test//' )
-            "/tmp/src/compile_lua_fuzzer" "$LUA_RUNTIME_NAME" $test_file
-            cp "$test_path" "$GITHUB_WORKSPACE/build/fuzz-targets/"
-            corpus_dir="test/static/corpus/$module_name"
-            if [ -e "$corpus_dir" ]; then
-              zip --quiet -j $GITHUB_WORKSPACE/build/fuzz-targets/"$test_name_we"_seed_corpus.zip $corpus_dir/*
-              echo "Build corpus '$GITHUB_WORKSPACE/build/fuzz-targets/"$test_name_we"_seed_corpus.zip' for the test '$test_name_we'"
+          if [[ "$FUZZING_ENGINE" == libfuzzer ]] &&
+             [[ "$SANITIZER" != "coverage" ]]; then
+            cmake --build build --target tarantool --parallel --verbose
+            LUA_RUNTIME_NAME=tarantool
+            TARANTOOL_PATH=build/src/$LUA_RUNTIME_NAME
+            LUA_MODULES_DIR=lua_modules
+            sudo apt-get install -y luarocks
+            LUA_LIBRARIES=$(realpath build/third_party/luajit/src/libluajit.a)
+            LUA_INCLUDE_DIR=$(realpath third_party/luajit/src)
+            luarocks install --lua-version 5.1 --server=https://luarocks.org/dev --tree=$LUA_MODULES_DIR luzer LUA_LIBRARIES="$LUA_LIBRARIES" LUA_INCLUDE_DIR="$LUA_INCLUDE_DIR" OSS_FUZZ=ON ENABLE_LUAJIT=ON LUAJIT_FRIENDLY_MODE=ON
+            lua_lib_path="build/test/fuzz/lua-tests/src/tests/lapi/lib*.lua"
+            if [ -f $lua_lib_path ]; then
+                cp $lua_lib_path $GITHUB_WORKSPACE/build/fuzz-targets
             fi
-          done
-          cp $TARANTOOL_PATH "$GITHUB_WORKSPACE/build/fuzz-targets/$LUA_RUNTIME_NAME"
-          cp -R $LUA_MODULES_DIR "$GITHUB_WORKSPACE/build/fuzz-targets/"
-          rm -f "$GITHUB_WORKSPACE/build/fuzz-targets/compile_lua_fuzzer" "/tmp/src/compile_lua_fuzzer"
+            LUZER_TEST_DIR="build/luzer_tests"
+            cmake --build build --parallel --verbose --target copy_tests
+            for test_path in $(find $LUZER_TEST_DIR -name "*.lua" -type f);
+            do
+              test_file=$(basename $test_path);
+              test_name_we="${test_file%.*}";
+              module_name=$(echo $test_name_we | sed 's/_test//' )
+              "/tmp/src/compile_lua_fuzzer" "$LUA_RUNTIME_NAME" $test_file
+              cp "$test_path" "$GITHUB_WORKSPACE/build/fuzz-targets/"
+              corpus_dir="test/static/corpus/$module_name"
+              if [ -e "$corpus_dir" ]; then
+                zip --quiet -j $GITHUB_WORKSPACE/build/fuzz-targets/"$test_name_we"_seed_corpus.zip $corpus_dir/*
+                echo "Build corpus '$GITHUB_WORKSPACE/build/fuzz-targets/"$test_name_we"_seed_corpus.zip' for the test '$test_name_we'"
+              fi
+            done
+            cp $TARANTOOL_PATH "$GITHUB_WORKSPACE/build/fuzz-targets/$LUA_RUNTIME_NAME"
+            cp -R $LUA_MODULES_DIR "$GITHUB_WORKSPACE/build/fuzz-targets/"
+            rm -f "$GITHUB_WORKSPACE/build/fuzz-targets/compile_lua_fuzzer" "/tmp/src/compile_lua_fuzzer"
+          fi
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)

@@ -66,7 +66,7 @@ jobs:
           cd /tmp/src/osquery
           set +e
           PROJECT=osquery
-          ln -s /usr/include/locale.h /usr/include/xlocale.h
+          sudo ln -sf /usr/include/locale.h /usr/include/xlocale.h
           ( cd / &&\
             mv "/tmp/src/${PROJECT}" "/tmp/src/${PROJECT}-dev" &&\
             mv "/tmp/src/${PROJECT}-dev" "/tmp/src/${PROJECT}" )
@@ -82,7 +82,7 @@ jobs:
           cmake \
             "-DCMAKE_EXE_LINKER_FLAGS=${LIB_FUZZING_ENGINE} -Wl,-rpath,'\$ORIGIN/lib'" \
             ..
-          sed -i 's/AUDIT_FILTER_EXCLUDE/AUDIT_FILTER_EXCLUDE1/g' /src/osquery/libraries/cmake/source/libaudit/src/lib/libaudit.h
+          sed -i 's/AUDIT_FILTER_EXCLUDE/AUDIT_FILTER_EXCLUDE1/g' /tmp/src/osquery/libraries/cmake/source/libaudit/src/lib/libaudit.h
           cmake --build . -j$(nproc) --target osqueryfuzz-config
           cmake --build . -j$(nproc) --target osqueryfuzz-sqlquery
           find . -type f -name '*.o' -delete

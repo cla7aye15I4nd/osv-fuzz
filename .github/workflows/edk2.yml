@@ -32,6 +32,7 @@ jobs:
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
             nasm \
+            python-is-python3 \
             uuid-dev
 
       - name: Clone source
@@ -68,6 +69,17 @@ jobs:
               /tmp/src/hbfa-fl/HBFA/UefiHostTestTools/HBFAEnvSetup.py
           sed -i 's/BuildCmdList.append(.GCC5.)/BuildCmdList.append("GCC")/' \
               /tmp/src/hbfa-fl/HBFA/UefiHostTestTools/RunLibFuzzer.py
+          # Patch tools_def.customized to use AFL++ compiler wrappers for fuzz targets
+          AFL_CC_PATH=$(which afl-cc)
+          AFL_CXX_PATH=$(which afl-c++)
+          sed -i "s|/usr/bin/gcc|${AFL_CC_PATH}|g; s|/usr/bin/g++|${AFL_CXX_PATH}|g" \
+              /tmp/src/hbfa-fl/HBFA/UefiHostFuzzTestPkg/Conf/tools_def.customized
+          # Pre-build edk2 BaseTools with system compiler (avoids ASAN/AFL instrumentation issues)
+          (
+            cd /tmp/src/edk2
+            for p in /tmp/src/hbfa-fl/edk2-bugfixes/*.patch; do patch -p1 < "$p" || true; done
+            env -u CC -u CXX -u CFLAGS -u CXXFLAGS make -C BaseTools -j$(nproc)
+          )
           hbfa-fl/oss-fuzz/build.sh
           set -e
           # Verify at least one fuzz target was built

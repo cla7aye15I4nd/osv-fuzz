@@ -37,7 +37,12 @@ jobs:
             libbison-dev \
             libcunit1 \
             libcunit1-dev \
-            libssl-dev
+            libssl-dev \
+            ninja-build \
+            python3-pip \
+            liblzma-dev \
+            libz-dev \
+            libtool
 
       - name: Clone source
         run: |
@@ -66,7 +71,16 @@ jobs:
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           cd /tmp/src/cyclonedds
           set +e
-          source fuzz/oss-fuzz-build.sh
+          # The oss-fuzz-build.sh script calls apt-get without sudo and uses
+          # set -e internally, which kills it on GH Actions. Create a no-op
+          # apt-get wrapper since we already installed the needed packages.
+          mkdir -p /tmp/fake-bin
+          printf '#!/bin/sh\nexit 0\n' > /tmp/fake-bin/apt-get
+          chmod +x /tmp/fake-bin/apt-get
+          export PATH="/tmp/fake-bin:$PATH"
+          # Allow pip3 install without venv on Ubuntu 24.04
+          export PIP_BREAK_SYSTEM_PACKAGES=1
+          bash -x fuzz/oss-fuzz-build.sh
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)

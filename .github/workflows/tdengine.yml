@@ -94,7 +94,7 @@ jobs:
           fi
           cmake -DBUILD_HTTP=true -DBUILD_TEST=false ..
           cmake --build . --target parser nodes catalog function scalar -- -j$(nproc)
-          TDENGINE_SRC=/src/tdengine
+          TDENGINE_SRC=/tmp/src/tdengine
           BUILDLIB=${TDENGINE_SRC}/debug/build/lib
           EXTLIB=${TDENGINE_SRC}/.externals/install
           $CC $CFLAGS \

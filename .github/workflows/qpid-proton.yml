@@ -32,8 +32,8 @@ jobs:
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
             cmake \
-            python3.9 \
-            python3.9-dev
+            python3 \
+            python3-dev
 
       - name: Clone source
         run: |

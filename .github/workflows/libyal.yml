@@ -115,9 +115,9 @@ jobs:
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
           set +e
-          for PROJECT in /tmp/src/*;
+          for PROJECT_DIR in /tmp/src/*;
           do
-            PROJECT=$(basename ${PROJECT})
+            export PROJECT=$(basename ${PROJECT_DIR})
             if ! test -d /tmp/src/${PROJECT}/ossfuzz || ! test -x /tmp/src/${PROJECT}/synclibs.sh;
             then
               continue
