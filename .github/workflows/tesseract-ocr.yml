@@ -78,6 +78,9 @@ jobs:
           sudo rm -f /usr/lib/x86_64-linux-gnu/libm.a /usr/lib/x86_64-linux-gnu/libm-2.39.a
           echo '!<arch>' | sudo tee /usr/lib/x86_64-linux-gnu/libm.a > /dev/null
           set +e
+          # Remove _GLIBCXX_DEBUG from upstream build script — it causes ABI mismatch
+          # between tesseract and system libraries on the runner
+          sed -i 's/-D_GLIBCXX_DEBUG//' /tmp/src/tesseract/unittest/fuzzers/oss-fuzz-build.sh
           /tmp/src/tesseract/unittest/fuzzers/oss-fuzz-build.sh
           set -e
           # Verify at least one fuzz target was built
