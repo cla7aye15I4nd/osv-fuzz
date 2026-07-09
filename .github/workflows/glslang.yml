@@ -45,14 +45,8 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          # Pattern: *_fuzzer.cc — download matching files via GitHub API
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/glslang" | \
-            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*_fuzzer\\.cc', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
-          # Pattern: *.sh — download matching files via GitHub API
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/glslang" | \
-            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.sh', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/compile_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/glslang/compile_fuzzer.cc"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/run_tests.sh "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/glslang/run_tests.sh"
 
       - name: Build fuzz targets with AFL++
         run: |

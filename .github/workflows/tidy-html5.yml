@@ -42,22 +42,15 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          # Pattern: *.sh — download matching files via GitHub API
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/tidy-html5" | \
-            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.sh', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
-          # Pattern: *.c — download matching files via GitHub API
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/tidy-html5" | \
-            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.c', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
-          # Pattern: *.h — download matching files via GitHub API
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/tidy-html5" | \
-            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.h', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
-          # Pattern: *.options — download matching files via GitHub API
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/tidy-html5" | \
-            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*\\.options', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/run_tests.sh "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tidy-html5/run_tests.sh"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/tidy_config_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tidy-html5/tidy_config_fuzzer.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/tidy_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tidy-html5/tidy_fuzzer.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/tidy_general_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tidy-html5/tidy_general_fuzzer.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/tidy_parse_file_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tidy-html5/tidy_parse_file_fuzzer.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/tidy_parse_string_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tidy-html5/tidy_parse_string_fuzzer.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/tidy_xml_fuzzer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tidy-html5/tidy_xml_fuzzer.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzzer_temp_file.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tidy-html5/fuzzer_temp_file.h"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/tidy_config_fuzzer.options "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/tidy-html5/tidy_config_fuzzer.options"
 
       - name: Build fuzz targets with AFL++
         run: |

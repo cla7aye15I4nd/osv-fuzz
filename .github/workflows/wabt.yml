@@ -42,10 +42,12 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          # Pattern: *_fuzzer.cc — download matching files via GitHub API
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/wabt" | \
-            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*_fuzzer\\.cc', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/read_binary_interp_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/wabt/read_binary_interp_fuzzer.cc"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/read_binary_ir_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/wabt/read_binary_ir_fuzzer.cc"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/wasm2wat_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/wabt/wasm2wat_fuzzer.cc"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/wasm_interp_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/wabt/wasm_interp_fuzzer.cc"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/wasm_objdump_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/wabt/wasm_objdump_fuzzer.cc"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/wat2wasm_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/wabt/wat2wasm_fuzzer.cc"
 
       - name: Build fuzz targets with AFL++
         run: |

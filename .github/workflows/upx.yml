@@ -47,9 +47,10 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src/upx/fuzzers
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/upx/fuzzers" | \
-            python3 -c "import json,sys; files=json.load(sys.stdin); [print(f['download_url']) for f in files if f['type']=='file']" | \
-            while read url; do curl -sLO --output-dir /tmp/src/upx/fuzzers "$url"; done
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/upx/fuzzers/build.patch "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/upx/fuzzers/build.patch"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/upx/fuzzers/decompress_packed_file_fuzzer.cpp "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/upx/fuzzers/decompress_packed_file_fuzzer.cpp"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/upx/fuzzers/list_packed_file_fuzzer.cpp "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/upx/fuzzers/list_packed_file_fuzzer.cpp"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/upx/fuzzers/test_packed_file_fuzzer.cpp "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/upx/fuzzers/test_packed_file_fuzzer.cpp"
 
       - name: Build fuzz targets with AFL++
         run: |

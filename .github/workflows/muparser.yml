@@ -45,10 +45,8 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          # Pattern: *_fuzzer.cc — download matching files via GitHub API
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/muparser" | \
-            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'.*_fuzzer\\.cc', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/c_api_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/muparser/c_api_fuzzer.cc"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/set_eval_fuzzer.cc "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/muparser/set_eval_fuzzer.cc"
 
       - name: Build fuzz targets with AFL++
         run: |

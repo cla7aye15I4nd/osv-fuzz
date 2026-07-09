@@ -52,18 +52,23 @@ jobs:
       - name: Download fuzzer files from oss-fuzz
         run: |
           mkdir -p /tmp/src
-          # Pattern: fuzz*.cpp — download matching files via GitHub API
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/openvpn" | \
-            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'fuzz.*\\.cpp', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
-          # Pattern: fuzz*.c — download matching files via GitHub API
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/openvpn" | \
-            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'fuzz.*\\.c', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
-          # Pattern: fuzz*.h — download matching files via GitHub API
-          curl -sfL --retry 3 --retry-delay 5 -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/google/oss-fuzz/contents/projects/openvpn" | \
-            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'fuzz.*\\.h', f['name'])]" | \
-            while read url; do curl -sfL --retry 3 --retry-delay 5 -O --output-dir /tmp/src "$url"; done
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_base64.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_base64.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_buffer.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_buffer.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_crypto.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_crypto.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_dhcp.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_dhcp.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_forward.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_forward.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_list.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_list.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_misc.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_misc.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_mroute.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_mroute.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_packet_id.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_packet_id.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_proxy.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_proxy.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_randomizer.cpp "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_randomizer.cpp"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_route.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_route.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_verify_cert.c "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_verify_cert.c"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz.h"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_header.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_header.h"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_randomizer.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_randomizer.h"
+          curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/fuzz_verify_cert.h "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/fuzz_verify_cert.h"
           curl -sfL --retry 3 --retry-delay 5 -o /tmp/src/crypto_patch.txt "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/openvpn/crypto_patch.txt"
 
       - name: Build fuzz targets with AFL++
