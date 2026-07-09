@@ -121,6 +121,7 @@ jobs:
           HARNESS_EOF
 
           # Compile ujson decoder with AFL++ instrumentation
+          cd /tmp/src/ultrajson
           afl-cc $CFLAGS -c lib/ultrajsondec.c -Ilib -o /tmp/work/ultrajsondec.o
 
           # Compile harness (includes stub dconv + fuzzer entry point)

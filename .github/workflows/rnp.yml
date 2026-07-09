@@ -70,7 +70,7 @@ jobs:
           git clone --depth 1 https://github.com/randombit/botan.git /tmp/src/botan
           cd /tmp/src/botan
           BOTAN_MODULES=$(<"/tmp/src/rnp/ci/botan3-pqc-modules" tr '\n' ',')
-          ./configure.py --prefix=/usr --cc-bin="$CXX" --cc-abi-flags="$CXXFLAGS" \
+          python3 ./configure.py --prefix=/usr --cc-bin="$CXX" --cc-abi-flags="$CXXFLAGS" \
                          --unsafe-fuzzer-mode \
                          --with-fuzzer-lib='FuzzingEngine' \
                          --minimized-build \
