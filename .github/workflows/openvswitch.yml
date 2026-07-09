@@ -33,6 +33,8 @@ jobs:
           sudo apt-get install -y -qq \
             autoconf \
             automake \
+            libc++-dev \
+            libc++abi-dev \
             libssl-dev \
             libtool \
             libz-dev

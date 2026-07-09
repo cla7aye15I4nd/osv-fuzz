@@ -65,6 +65,19 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+          # Create libFuzzingEngine stub for meson
+          mkdir -p /tmp/fuzzer_stub
+          cat > /tmp/fuzzer_stub/stub.c << 'STUBEOF'
+          #include <stdint.h>
+          #include <stddef.h>
+          extern int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
+          int main(int argc, char **argv) {
+            (void)argc; (void)argv;
+            return LLVMFuzzerTestOneInput(NULL, 0);
+          }
+          STUBEOF
+          afl-cc -c /tmp/fuzzer_stub/stub.c -o /tmp/fuzzer_stub/stub.o
+          ar rcs /usr/lib/libFuzzingEngine.a /tmp/fuzzer_stub/stub.o
           cd /tmp/src/lxc
           set +e
           export CFLAGS="${CFLAGS} -Wno-error=backend-plugin"
