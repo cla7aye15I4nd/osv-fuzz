@@ -52,15 +52,13 @@ jobs:
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 50 --recursive https://github.com/tarantool/tarantool /tmp/src/tarantool
-          cd /tmp/src/tarantool && git fetch --tags
+          git clone --depth 50 https://github.com/tarantool/tarantool /tmp/src/tarantool
+          cd /tmp/src/tarantool
+          git fetch --tags
+          git submodule update --init --recursive --depth 1 || true
           # Create VERSION file so cmake doesn't rely on git describe
           latest_tag=$(git tag --sort=-v:refname | head -1)
-          if [ -n "$latest_tag" ]; then
-            echo "$latest_tag" > VERSION
-          else
-            echo "3.0.0" > VERSION
-          fi
+          echo "${latest_tag:-3.0.0}" > VERSION
           cd -
           rm -rf /tmp/src/tarantool/test/static 2>/dev/null || true
           git clone --depth 1 --recursive https://github.com/ligurio/tarantool-corpus /tmp/src/tarantool/test/static
