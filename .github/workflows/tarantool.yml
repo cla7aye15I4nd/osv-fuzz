@@ -61,11 +61,13 @@ jobs:
           git config user.name "osv-fuzz"
           git tag -a -f -m "fuzz build" v99.0.0-fuzz HEAD
           # Also tag luajit submodule so its SetVersion.cmake git describe works
+          # Format must match: v{major}.{minor}.{patch}[-beta{N}]-{tweak}-g{hash}
           if [ -d third_party/luajit ]; then
             cd third_party/luajit
             git config user.email "ci@osv-fuzz"
             git config user.name "osv-fuzz"
-            git tag -a -f -m "fuzz build" v2.1.0-fuzz HEAD
+            short=$(git rev-parse --short HEAD)
+            git tag -a -f -m "fuzz build" "v2.1.0-beta3-0-g${short}" HEAD
             cd ../..
           fi
           cd -
