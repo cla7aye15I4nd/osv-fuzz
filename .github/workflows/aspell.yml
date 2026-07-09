@@ -30,6 +30,12 @@ jobs:
       - name: Install AFL++ and dependencies
         run: |
           bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autopoint \
+            bzip2 \
+            gettext \
+            texinfo \
+            wget
 
       - name: Clone source
         run: |
@@ -57,11 +63,15 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
-          cd /tmp/src/aspell-fuzz
           set +e
-          pushd /tmp/src/aspell-fuzz
-          ./ossfuzz.sh
-          popd
+          # Create a no-op apt-get wrapper (deps already installed above;
+          # ossfuzz.sh calls apt-get without sudo which fails on GH Actions)
+          mkdir -p /tmp/fake-bin
+          printf '#!/bin/sh\nexit 0\n' > /tmp/fake-bin/apt-get
+          chmod +x /tmp/fake-bin/apt-get
+          export PATH="/tmp/fake-bin:$PATH"
+          cd /tmp/src/aspell-fuzz
+          bash -x ./ossfuzz.sh
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)

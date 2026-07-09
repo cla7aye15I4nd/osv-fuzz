@@ -74,13 +74,22 @@ jobs:
           AFL_CXX_PATH=$(which afl-c++)
           sed -i "s|/usr/bin/gcc|${AFL_CC_PATH}|g; s|/usr/bin/g++|${AFL_CXX_PATH}|g" \
               /tmp/src/hbfa-fl/HBFA/UefiHostFuzzTestPkg/Conf/tools_def.customized
+          # Also patch tools_def.txt (build.sh copies this to Conf/tools_def.txt)
+          sed -i 's/GCC5_/GCC_/g; s/GCC48_/GCC_/g; s/GCC49_/GCC_/g' \
+              /tmp/src/hbfa-fl/HBFA/UefiHostFuzzTestPkg/Conf/tools_def.txt
+          sed -i "s|/usr/bin/gcc|${AFL_CC_PATH}|g; s|/usr/bin/g++|${AFL_CXX_PATH}|g" \
+              /tmp/src/hbfa-fl/HBFA/UefiHostFuzzTestPkg/Conf/tools_def.txt
           # Pre-build edk2 BaseTools with system compiler (avoids ASAN/AFL instrumentation issues)
           (
             cd /tmp/src/edk2
             for p in /tmp/src/hbfa-fl/edk2-bugfixes/*.patch; do patch -p1 < "$p" || true; done
             env -u CC -u CXX -u CFLAGS -u CXXFLAGS make -C BaseTools -j$(nproc)
           )
-          hbfa-fl/oss-fuzz/build.sh
+          # Run build.sh without CC/CXX overrides (afl-cc paths are in tools_def.txt;
+          # unsetting prevents make -C BaseTools from rebuilding with afl-cc).
+          # COVERAGE_FLAGS must be set (build.sh uses bash -eu and references it).
+          env -u CC -u CXX -u CFLAGS -u CXXFLAGS COVERAGE_FLAGS="" \
+              bash hbfa-fl/oss-fuzz/build.sh
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)

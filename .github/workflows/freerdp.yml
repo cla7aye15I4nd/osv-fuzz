@@ -36,10 +36,21 @@ jobs:
             devscripts \
             equivs \
             git-core \
+            libcjson-dev \
+            libjpeg-dev \
+            libkrb5-dev \
+            libpam0g-dev \
+            libpcsclite-dev \
+            libpng-dev \
+            libssl-dev \
+            liburiparser-dev \
             libwayland-dev \
+            libwebp-dev \
             libxkbcommon-dev \
             ninja-build \
-            pkg-config
+            pkg-config \
+            uuid-dev \
+            zlib1g-dev
 
       - name: Clone source
         run: |

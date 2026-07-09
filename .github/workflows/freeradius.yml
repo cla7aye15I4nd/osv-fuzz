@@ -54,8 +54,8 @@ jobs:
           mkdir -p build/fuzz-targets /tmp/work
           export CC=afl-cc
           export CXX=afl-c++
-          export CFLAGS="${CFLAGS:-} -fsanitize=address"
-          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
+          export CFLAGS="${CFLAGS:-} -fsanitize=address -shared-libasan"
+          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address -shared-libasan"
           export FUZZING_ENGINE=afl
           export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
           export SANITIZER=address
@@ -81,10 +81,14 @@ jobs:
           done
           # Configure with fuzzer support
           ./configure --enable-fuzzer --enable-address-sanitizer
+          # Preload ASAN shared runtime so GNU make can dlopen ASAN-instrumented
+          # build helpers (libfreeradius-make-dlopen.so is loaded via make's
+          # `load` directive; static ASAN cannot be dlopened into non-ASAN processes)
+          ASAN_LIB=$(find /usr -name "libclang_rt.asan-x86_64.so" 2>/dev/null | head -1)
           # make tries to compile regular programs as fuzz targets
           # so -i flag ignores these errors
-          make -i -j$(nproc)
-          make -i install
+          LD_PRELOAD="${ASAN_LIB}" make -i -j$(nproc)
+          LD_PRELOAD="${ASAN_LIB}" make -i install
           sudo ldconfig
           # Copy fuzzer binaries with their shared library dependencies
           mkdir -p $OUT/lib
@@ -105,6 +109,10 @@ jobs:
               copy_lib "${i}" libunwind
               cp "${i}" "$OUT/"
           done
+          # Copy ASAN shared runtime (needed by fuzzer binaries at runtime with -shared-libasan)
+          if [ -n "${ASAN_LIB:-}" ] && [ -f "${ASAN_LIB}" ]; then
+              cp "$ASAN_LIB" "${OUT}/lib/"
+          fi
           # Copy dictionary files needed at runtime
           if [ -d /usr/local/share/freeradius/dictionary ]; then
               cp -r /usr/local/share/freeradius/dictionary $OUT/dict
