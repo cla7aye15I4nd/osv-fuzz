@@ -35,8 +35,8 @@ jobs:
             automake \
             cmake \
             coreutils \
-            libc++-dev \
-            libc++abi-dev \
+            libc++-18-dev \
+            libc++abi-18-dev \
             libcurl4-openssl-dev \
             libncurses5-dev \
             libreadline-dev \
