@@ -101,6 +101,27 @@ jobs:
           sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
           sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
           echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+          # Create libFuzzingEngine.a stub for autotools projects that link -lFuzzingEngine
+          cat > /tmp/fuzzer_stub.c << 'STUBEOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          extern int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+          __attribute__((weak)) int LLVMFuzzerInitialize(int *argc, char ***argv) { (void)argc; (void)argv; return 0; }
+          int main(int argc, char **argv) {
+              LLVMFuzzerInitialize(&argc, &argv);
+              unsigned char *buf = NULL; size_t len = 0;
+              FILE *f = (argc > 1) ? fopen(argv[1], "rb") : stdin;
+              if (!f) return 1;
+              fseek(f, 0, SEEK_END); len = (size_t)ftell(f); fseek(f, 0, SEEK_SET);
+              if (len == 0 || len == (size_t)-1) { buf = malloc(1024*1024); len = fread(buf, 1, 1024*1024, f); }
+              else { buf = malloc(len); fread(buf, 1, len, f); }
+              if (argc > 1) fclose(f);
+              int ret = LLVMFuzzerTestOneInput(buf, len);
+              free(buf); return ret;
+          }
+          STUBEOF
+          afl-cc -c /tmp/fuzzer_stub.c -o /tmp/fuzzer_stub.o
+          sudo ar rcs /usr/lib/libFuzzingEngine.a /tmp/fuzzer_stub.o
           cd /tmp/src
           set +e
           export CXXFLAGS="$CXXFLAGS -Wno-register"

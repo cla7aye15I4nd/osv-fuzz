@@ -84,6 +84,7 @@ jobs:
           export PIP_BREAK_SYSTEM_PACKAGES=1
           # fuzz_type_graph requires protobuf + libprotobuf-mutator (not available on GH Actions)
           sed -i '/fuzz_type_graph/d' fuzz/CMakeLists.txt
+          export AFL_IGNORE_PROBLEMS=1
           bash -x fuzz/oss-fuzz-build.sh
           set -e
           # Verify at least one fuzz target was built
