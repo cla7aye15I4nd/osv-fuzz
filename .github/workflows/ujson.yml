@@ -36,40 +36,102 @@ jobs:
           mkdir -p /tmp/src
           git clone --depth 1 --recursive https://github.com/ultrajson/ultrajson.git /tmp/src/ultrajson
 
-      - name: Download fuzzer files from oss-fuzz
-        run: |
-          mkdir -p /tmp/src
-          curl -sL -o /tmp/src/json_differential_fuzzer.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ujson/json_differential_fuzzer.py"
-          curl -sL -o /tmp/src/ujson_fuzzer.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ujson/ujson_fuzzer.py"
-          curl -sL -o /tmp/src/hypothesis_structured_fuzzer.py "https://raw.githubusercontent.com/google/oss-fuzz/master/projects/ujson/hypothesis_structured_fuzzer.py"
-
       - name: Build fuzz targets with AFL++
         run: |
           mkdir -p build/fuzz-targets /tmp/work
           export CC=afl-cc
           export CXX=afl-c++
-          export CFLAGS="${CFLAGS:-} -fsanitize=address"
-          export CXXFLAGS="${CXXFLAGS:-} -fsanitize=address"
-          export FUZZING_ENGINE=afl
-          export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
-          export SANITIZER=address
-          export ARCHITECTURE=x86_64
-          export SRC=/tmp/src
+          export CFLAGS="-fsanitize=address -g"
+          export CXXFLAGS="-fsanitize=address -g"
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
-          export WORK=/tmp/work
-          # Take ownership of /usr/local for install commands (Docker runs as root)
-          sudo chown -R $(id -u):$(id -g) /usr/local 2>/dev/null || true
-          # Allow ldconfig to update cache
-          sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
-          sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
-          echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+
           cd /tmp/src/ultrajson
-          set +e
-          pip3 install .
-          for fuzzer in $(find /tmp/src -name '*_fuzzer.py'); do
-            compile_python_fuzzer $fuzzer
-          done
-          set -e
+
+          # Write inline C harness for ujson's JSON decoder.
+          # Uses stub dconv (strtod-based) to avoid the double-conversion C++ dependency.
+          cat > /tmp/work/ujson_fuzzer.c << 'HARNESS_EOF'
+          #include <stdint.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include "ultrajson.h"
+
+          /* Stub dconv functions using libc strtod */
+          void dconv_s2d_init(void **s2d, int f, double e, double j,
+                              const char *i, const char *n) { *s2d = (void*)1; }
+          double dconv_s2d(void *s2d, const char *buf, int len, int *out) {
+              char tmp[256]; int n = len < 255 ? len : 255;
+              memcpy(tmp, buf, n); tmp[n] = '\0';
+              char *end; double v = strtod(tmp, &end);
+              *out = (int)(end - tmp); return v;
+          }
+          void dconv_s2d_free(void **s2d) { *s2d = NULL; }
+          void dconv_d2s_init(void **d, int a, const char *b, const char *c,
+                              char d2, int e, int f, int g, int h) { *d = (void*)1; }
+          int  dconv_d2s(void *d, double v, char *b, int l, int *s) {
+              *s = snprintf(b, l, "%g", v); return 1;
+          }
+          void dconv_d2s_free(void **d) { *d = NULL; }
+
+          static JSOBJ cb_str(void *p, JSUINT32 *s, JSUINT32 *e) { return (JSOBJ)1; }
+          static void  cb_addkey(void *p, JSOBJ o, JSOBJ n, JSOBJ v) {}
+          static void  cb_additem(void *p, JSOBJ o, JSOBJ v) {}
+          static JSOBJ cb_true(void *p) { return (JSOBJ)1; }
+          static JSOBJ cb_false(void *p) { return (JSOBJ)1; }
+          static JSOBJ cb_null(void *p) { return (JSOBJ)1; }
+          static JSOBJ cb_nan(void *p) { return (JSOBJ)1; }
+          static JSOBJ cb_posinf(void *p) { return (JSOBJ)1; }
+          static JSOBJ cb_neginf(void *p) { return (JSOBJ)1; }
+          static JSOBJ cb_obj(void *p) { return (JSOBJ)1; }
+          static JSOBJ cb_arr(void *p) { return (JSOBJ)1; }
+          static JSOBJ cb_int(void *p, JSINT32 v) { return (JSOBJ)1; }
+          static JSOBJ cb_long(void *p, JSINT64 v) { return (JSOBJ)1; }
+          static JSOBJ cb_ulong(void *p, JSUINT64 v) { return (JSOBJ)1; }
+          static JSOBJ cb_intstr(void *p, char *v, size_t l) { return (JSOBJ)1; }
+          static JSOBJ cb_dbl(void *p, double v) { return (JSOBJ)1; }
+          static void  cb_release(void *p, JSOBJ o) {}
+
+          int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+              if (size == 0 || size > 1024 * 1024) return 0;
+              char *buf = (char *)malloc(size + 1);
+              if (!buf) return 0;
+              memcpy(buf, data, size);
+              buf[size] = '\0';
+
+              JSONObjectDecoder dec;
+              memset(&dec, 0, sizeof(dec));
+              dec.newString = cb_str;
+              dec.objectAddKey = cb_addkey;
+              dec.arrayAddItem = cb_additem;
+              dec.newTrue = cb_true;   dec.newFalse = cb_false;
+              dec.newNull = cb_null;   dec.newNaN = cb_nan;
+              dec.newPosInf = cb_posinf; dec.newNegInf = cb_neginf;
+              dec.newObject = cb_obj;  dec.newArray = cb_arr;
+              dec.newInt = cb_int;     dec.newLong = cb_long;
+              dec.newUnsignedLong = cb_ulong;
+              dec.newIntegerFromString = cb_intstr;
+              dec.newDouble = cb_dbl;
+              dec.releaseObject = cb_release;
+              dec.malloc = malloc; dec.free = free; dec.realloc = realloc;
+              dconv_s2d_init(&dec.s2d, 0, 0.0, 0.0, "Inf", "NaN");
+              JSON_DecodeObject(&dec, buf, size);
+              dconv_s2d_free(&dec.s2d);
+              free(buf);
+              return 0;
+          }
+          HARNESS_EOF
+
+          # Compile ujson decoder with AFL++ instrumentation
+          afl-cc $CFLAGS -c lib/ultrajsondec.c -Ilib -o /tmp/work/ultrajsondec.o
+
+          # Compile harness (includes stub dconv + fuzzer entry point)
+          afl-cc $CFLAGS -c /tmp/work/ujson_fuzzer.c -Ilib -o /tmp/work/ujson_fuzzer.o
+
+          # Link into AFL++ fuzz target
+          afl-cc -fsanitize=fuzzer,address \
+              /tmp/work/ujson_fuzzer.o \
+              /tmp/work/ultrajsondec.o \
+              -lm -o $OUT/ujson_fuzzer
+
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
           echo "[+] Built $target_count fuzz targets"

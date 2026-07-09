@@ -74,7 +74,16 @@ jobs:
           mkdir Sources/swift-nio-http1-fuzz
           cp /tmp/src/fuzz_http1.swift Sources/swift-nio-http1-fuzz/main.swift
           cp /tmp/src/Package.swift Package.swift
-          . precompile_swift
+          # precompile_swift is an oss-fuzz Docker helper that does not exist
+          # on GitHub Actions. Set SWIFTFLAGS manually instead.
+          export SWIFTFLAGS="-Xswiftc -parse-as-library -Xswiftc -static-stdlib --static-swift-stdlib"
+          export SWIFTFLAGS="$SWIFTFLAGS --sanitize=fuzzer --sanitize=$SANITIZER"
+          for f in $CFLAGS; do
+              export SWIFTFLAGS="$SWIFTFLAGS -Xcc=$f"
+          done
+          for f in $CXXFLAGS; do
+              export SWIFTFLAGS="$SWIFTFLAGS -Xcxx=$f"
+          done
           swift build -c debug $SWIFTFLAGS
           (
           cd .build/debug/

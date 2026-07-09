@@ -1,4 +1,4 @@
-name: "Fuzz tcmalloc"
+name: "Fuzz ots"
 
 on:
   workflow_dispatch:
@@ -7,10 +7,10 @@ on:
         description: "Fuzzing duration in seconds"
         default: "1800"
   schedule:
-    - cron: "0 16 * * 0"
+    - cron: "0 22 * * 0"
 
 env:
-  PROJECT: tcmalloc
+  PROJECT: ots
   FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -31,24 +31,22 @@ jobs:
         run: |
           bash scripts/setup_aflpp.sh
           sudo apt-get install -y -qq \
-            autoconf \
-            automake \
-            libtool \
-            libc++-dev \
-            libc++abi-dev
-          # Install Bazelisk (provides the bazel command)
-          sudo curl -fsSL -o /usr/local/bin/bazel \
-            https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
-          sudo chmod +x /usr/local/bin/bazel
-          # Download bazel_build_fuzz_tests helper from oss-fuzz
-          sudo curl -fsSL -o /usr/local/bin/bazel_build_fuzz_tests \
-            https://raw.githubusercontent.com/google/oss-fuzz/master/infra/base-images/base-builder/bazel_build_fuzz_tests
-          sudo chmod +x /usr/local/bin/bazel_build_fuzz_tests
+            meson \
+            ninja-build
+          pip3 install meson || true
 
       - name: Clone source
         run: |
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/google/tcmalloc /tmp/src/tcmalloc
+          git clone --depth 1 --recursive https://github.com/khaledhosny/ots.git /tmp/src/ots
+
+      - name: Download fuzzer files from oss-fuzz
+        run: |
+          mkdir -p /tmp/src
+          # Pattern: ots-fuzzer.* — download matching files via GitHub API
+          curl -sL "https://api.github.com/repos/google/oss-fuzz/contents/projects/ots" | \
+            python3 -c "import json,sys,re; files=json.load(sys.stdin); [print(f['download_url']) for f in files if re.match(r'ots-fuzzer\\..*', f['name'])]" | \
+            while read url; do curl -sLO --output-dir /tmp/src "$url"; done
 
       - name: Build fuzz targets with AFL++
         run: |
@@ -61,48 +59,28 @@ jobs:
           export LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
           export SANITIZER=address
           export ARCHITECTURE=x86_64
-          export FUZZING_LANGUAGE=cc
           export SRC=/tmp/src
           export OUT=$GITHUB_WORKSPACE/build/fuzz-targets
           export WORK=/tmp/work
-
-          # Create a minimal rules_fuzzing_oss_fuzz engine repository.
-          # This replicates what the oss-fuzz Docker image provides: a Bazel
-          # package that wraps $LIB_FUZZING_ENGINE so bazel_build_fuzz_tests
-          # can build cc_fuzz_test targets with AFL++ instrumentation.
-          mkdir -p /tmp/rules_fuzzing_oss_fuzz
-          cat > /tmp/rules_fuzzing_oss_fuzz/WORKSPACE << 'WEOF'
-          workspace(name = "rules_fuzzing_oss_fuzz")
-          WEOF
-          cat > /tmp/rules_fuzzing_oss_fuzz/BUILD.bazel << 'BEOF'
-          load("@rules_fuzzing//fuzzing:cc_defs.bzl", "cc_fuzzing_engine")
-
-          cc_library(
-              name = "oss_fuzz_stub",
-              linkopts = ["-fsanitize=fuzzer"],
-              visibility = ["//visibility:public"],
-          )
-
-          cc_fuzzing_engine(
-              name = "oss_fuzz_engine",
-              display_name = "OSS-Fuzz (AFL++)",
-              launcher = "oss_fuzz_launcher.sh",
-              library = ":oss_fuzz_stub",
-              visibility = ["//visibility:public"],
-          )
-          BEOF
-          cat > /tmp/rules_fuzzing_oss_fuzz/oss_fuzz_launcher.sh << 'LEOF'
-          #!/bin/bash
-          exec "$@"
-          LEOF
-          chmod +x /tmp/rules_fuzzing_oss_fuzz/oss_fuzz_launcher.sh
-
-          export BAZEL_EXTRA_BUILD_FLAGS="--override_repository=rules_fuzzing_oss_fuzz=/tmp/rules_fuzzing_oss_fuzz"
-
-          cd /tmp/src/tcmalloc
+          # Take ownership of /usr/local for install commands (Docker runs as root)
+          sudo chown -R $(id -u):$(id -g) /usr/local 2>/dev/null || true
+          # Allow ldconfig to update cache
+          sudo chmod a+rw /etc/ld.so.cache 2>/dev/null || true
+          sudo touch /etc/ld.so.cache~ && sudo chmod a+rw /etc/ld.so.cache~ 2>/dev/null || true
+          echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/local.conf > /dev/null 2>/dev/null || true
+          cd /tmp/src/ots
           set +e
-          sed -i 's/standalone/sandboxed/g' /usr/local/bin/bazel_build_fuzz_tests
-          bazel_build_fuzz_tests
+          build=/tmp/work/build
+          rm -rf $build
+          mkdir -p $build
+          meson -Dfuzzer_ldflags="$(echo $LIB_FUZZING_ENGINE)" \
+                --wrap-mode=forcefallback \
+                $build \
+             || (cat $build/meson-logs/meson-log.txt && false)
+          ninja -v -j$(nproc) -C $build ots-fuzzer
+          mv $build/ots-fuzzer $GITHUB_WORKSPACE/build/fuzz-targets/
+          cp /tmp/src/ots-fuzzer.options $GITHUB_WORKSPACE/build/fuzz-targets/
+          zip -j -r $GITHUB_WORKSPACE/build/fuzz-targets/ots-fuzzer_seed_corpus.zip /tmp/src/ots/tests/fonts
           set -e
           # Verify at least one fuzz target was built
           target_count=$(find $OUT -type f -executable 2>/dev/null | wc -l)
