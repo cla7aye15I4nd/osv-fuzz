@@ -35,8 +35,6 @@ jobs:
             automake \
             cmake \
             coreutils \
-            libc++-18-dev \
-            libc++abi-18-dev \
             libcurl4-openssl-dev \
             libncurses5-dev \
             libreadline-dev \
@@ -104,6 +102,8 @@ jobs:
           # Replace static libm with empty stub to avoid IFUNC errors on glibc 2.39+
           sudo rm -f /usr/lib/x86_64-linux-gnu/libm.a /usr/lib/x86_64-linux-gnu/libm-2.39.a
           echo '!<arch>' | sudo tee /usr/lib/x86_64-linux-gnu/libm.a > /dev/null
+          # Create empty libc++ stub — cmake adds -lc++ but fuzzers are C-only and use libstdc++
+          echo '!<arch>' | sudo tee /usr/lib/x86_64-linux-gnu/libc++.a > /dev/null
           cd /tmp/src/tarantool
           set +e
           [[ -e /tmp/src/tarantool/build ]] && rm -rf /tmp/src/tarantool/build
