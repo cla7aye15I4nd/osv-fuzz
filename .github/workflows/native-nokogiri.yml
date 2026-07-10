@@ -161,7 +161,7 @@ jobs:
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
           export AFL_NO_UI=1
-          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0
 
           # Pick a seed to validate each target's instrumentation via afl-showmap.
           first_seed="$(find "seeds/$PROJECT" -name '*.bin' -type f | head -1 || true)"

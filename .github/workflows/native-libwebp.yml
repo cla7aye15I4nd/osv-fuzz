@@ -81,7 +81,7 @@ jobs:
         run: |
           set +e
           mkdir -p results/dry_run
-          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0
           # Recorded invocation: $BINDIR/dwebp $POC -o /dev/null
           crash_count=0
           total=0

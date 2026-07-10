@@ -72,7 +72,7 @@ jobs:
         run: |
           set +e
           mkdir -p results/dry_run
-          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0
           # Parallel arrays: one entry per recorded invocation.
           #   LABELS -> unique result-name prefix
           #   BINS   -> CLI binary under $BINDIR

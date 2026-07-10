@@ -82,7 +82,7 @@ jobs:
             work="$(mktemp -d)/${sname}.jpg"
             cp "$seed" "$work"
             set +e
-            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0 \
               "$BIN" -cmd "$CMD" "$work" > /dev/null 2> "$out.tmp"
             code=$?
             set -e
@@ -116,7 +116,7 @@ jobs:
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
           export AFL_NO_UI=1
-          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0
           # jhead takes the image path as a positional arg -> AFL feeds it via @@.
           # Guard with || true so a target that cannot start does not fail the job.
           afl-fuzz -i "seeds/$PROJECT" -o results/afl -m none -V "$FUZZ_DURATION" \

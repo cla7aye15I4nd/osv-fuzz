@@ -81,7 +81,7 @@ jobs:
             echo "[*] Replaying seed $sname ..."
             # Recorded invocation: unzip -p "$POC" | abcm2ps -
             set +e
-            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0 \
               bash -c 'unzip -p "$1" | "$2" -' _ "$seed" "$BIN" \
               > /dev/null 2> "$out.tmp"
             code=$?
@@ -121,7 +121,7 @@ jobs:
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
           export AFL_NO_UI=1
-          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0
           # Target reads stdin via '-', so no @@ — AFL feeds each testcase on stdin.
           afl-fuzz -i corpus -o results/afl -m none -V "$FUZZ_DURATION" -- "$BIN" - || true
 

@@ -73,7 +73,7 @@ jobs:
             echo "[*] Replaying $bname with $sname..."
             POC="$seed"
             set +e
-            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0 \
             timeout 60 "$BIN" "$POC" /tmp/dryrun_out.ogg > /dev/null 2> results/dry_run/.stderr_tmp
             exit_code=$?
             set -e
@@ -94,7 +94,7 @@ jobs:
           mkdir -p results/afl
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
-          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1:symbolize=0
           afl-fuzz \
             -i "seeds/$PROJECT" \
             -o results/afl \

@@ -177,7 +177,7 @@ jobs:
       - name: Dry-run replay (lost-bug check)
         run: |
           mkdir -p results/dry_run
-          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0
           crash_count=0
           total=0
           while IFS=$'\t' read -r label cmd; do
@@ -214,7 +214,7 @@ jobs:
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
           export AFL_NO_UI=1
-          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1:symbolize=0
 
           ntargets=$(wc -l < "$TARGETS_FILE")
           [ "$ntargets" -lt 1 ] && ntargets=1

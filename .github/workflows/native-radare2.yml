@@ -190,7 +190,7 @@ jobs:
           # The seed corpus is made of known-crashing PoCs; skip (don't abort on)
           # any seed that crashes/hangs during calibration.
           export AFL_IGNORE_SEED_PROBLEMS=1
-          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:allocator_may_return_null=1:symbolize=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:allocator_may_return_null=1:symbolize=1:symbolize=0
 
           ntargets=${#TARGETS[@]}
           if [ "$ntargets" -eq 0 ]; then

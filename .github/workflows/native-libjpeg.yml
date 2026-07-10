@@ -71,7 +71,7 @@ jobs:
         run: |
           set +e
           mkdir -p results/dry_run
-          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0
           # Recorded invocation: $BIN $POC /dev/null
           bname="jpeg"
           crash_count=0

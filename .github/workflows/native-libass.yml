@@ -97,7 +97,7 @@ jobs:
             total=$((total + 1))
             echo "[*] Replaying $bname with $sname..."
             set +e
-            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0 \
               timeout 60 "$BIN" "$seed" > /dev/null 2> "results/dry_run/.stderr_tmp"
             exit_code=$?
             set -e

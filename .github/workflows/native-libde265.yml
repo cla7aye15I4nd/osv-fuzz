@@ -108,7 +108,7 @@ jobs:
               total=$((total + 1))
               echo "[*] replay $label <= $sname ($cve)"
               set +e
-              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0 \
                 timeout 60 bash -c "$cmd" >/dev/null 2>"$rf.tmp"
               ec=$?
               set -e

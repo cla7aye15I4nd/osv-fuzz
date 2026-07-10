@@ -90,7 +90,7 @@ jobs:
               total=$((total + 1))
               echo "[*] Replay $bin ($infmt) with $sname..."
               set +e
-              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0 \
               BABEL_LIBDIR="$BINDIR/../lib" \
               BABEL_DATADIR="$BINDIR/../../data" \
               timeout 60 "$OBABEL" "$infmt" "$seed" -osmi -O /dev/null \

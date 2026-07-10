@@ -160,7 +160,7 @@ jobs:
               echo "[*] Replaying $tool with $sname..."
               rc=0
               # shellcheck disable=SC2086
-              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0 \
                 timeout 60 "$bin" $cmd_args > /dev/null 2> results/dry_run/.stderr_tmp || rc=$?
               if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
                 echo "  [!] CRASH: $tool with $sname (exit=$rc)"

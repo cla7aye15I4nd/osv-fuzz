@@ -101,7 +101,7 @@ jobs:
             sname=$(basename "$seed" .bin)
             total=$((total + 1))
             echo "[*] Replaying $sname through $bname ..."
-            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0 \
               timeout 60 "$BIN" "$seed" > /dev/null 2> results/dry_run/.stderr_tmp
             code=$?
             if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then

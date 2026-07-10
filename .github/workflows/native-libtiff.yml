@@ -156,7 +156,7 @@ jobs:
               echo "[*] replay $label <= $sname"
               # Capture exit code without toggling global set -e/+e.
               rc=0
-              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0 \
                 timeout 60 bash -c \
                 'exec "$@"' _ "$BINDIR/$tool" ${args//@@/$seed} \
                 >/dev/null 2>"$rf.tmp" || rc=$?
