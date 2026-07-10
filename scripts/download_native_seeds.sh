@@ -13,9 +13,21 @@ API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
 
 mkdir -p "$DEST"
 
+# Committed-seed fallback: this repo ships a copy of the corpus under
+# seeds/native/<project>/ so fuzzing works even when R2 is unavailable.
+COMMITTED="$(cd "$(dirname "$0")/.." && pwd)/seeds/native/${PROJECT}"
+use_committed() {
+    if [ -d "$COMMITTED" ]; then
+        cp "$COMMITTED"/*.bin "$DEST"/ 2>/dev/null || true
+        local c
+        c=$(find "$DEST" -name '*.bin' -type f 2>/dev/null | wc -l)
+        echo "[+] Using $c committed seeds from $COMMITTED"
+    fi
+}
+
 if [ -z "$API_TOKEN" ] || [ -z "$ACCOUNT_ID" ]; then
-    echo "[!] CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID not set — skipping seed download"
-    echo "[+] Downloaded 0 seeds to $DEST"
+    echo "[!] R2 creds not set — using committed seeds"
+    use_committed
     exit 0
 fi
 
@@ -44,3 +56,9 @@ for obj in data.get('result', []):
 done
 
 echo "[+] Downloaded $seed_count native seeds to $DEST"
+
+# Fall back to committed seeds if R2 returned nothing.
+if [ "$seed_count" -eq 0 ]; then
+    echo "[!] R2 returned 0 seeds — falling back to committed corpus"
+    use_committed
+fi
