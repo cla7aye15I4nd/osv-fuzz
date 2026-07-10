@@ -222,8 +222,8 @@ jobs:
               AFL_QUIET=1 afl-showmap -o "/tmp/map_${label}" -m none -t 10000 \
                 -- "$BINDIR/$bin" "${probe_args[@]}" >/dev/null 2>&1
               if [ ! -s "/tmp/map_${label}" ]; then
-                echo "[!] $label failed afl-showmap startup — skipping"
-                continue
+                echo "[!] $label failed afl-showmap startup — fuzzing anyway"
+                true  # do not skip; attempt fuzzing
               fi
             fi
 

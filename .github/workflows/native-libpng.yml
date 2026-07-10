@@ -200,7 +200,7 @@ jobs:
               if ! afl-showmap -o /dev/null -m none -t 5000 \
                   -- "$bin" $smap_args >/dev/null 2>&1; then
                 echo "[!] $name failed afl-showmap startup; skipping"
-                continue
+                true  # do not skip; attempt fuzzing
               fi
             fi
 

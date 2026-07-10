@@ -174,8 +174,8 @@ jobs:
               afl-showmap -m none -t 10000 -o "/tmp/map_$label" \
                 -- "$bin" ${args//@@/$smseed} >/dev/null 2>&1 || true
               if [ ! -s "/tmp/map_$label" ]; then
-                echo "[!] $label failed afl-showmap startup — skipping"
-                continue
+                echo "[!] $label failed afl-showmap startup — fuzzing anyway"
+                true  # do not skip; attempt fuzzing
               fi
             fi
 
