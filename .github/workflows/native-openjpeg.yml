@@ -1,0 +1,186 @@
+name: "Fuzz native openjpeg"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: openjpeg
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -40 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone latest upstream source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/uclouvain/openjpeg.git /tmp/src/openjpeg
+
+      - name: Build CLI tools with AFL++ + AddressSanitizer
+        run: |
+          set -e
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          cd /tmp/src/openjpeg
+          mkdir -p build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_CODEC=ON \
+            -DBUILD_THIRDPARTY=ON \
+            -DCMAKE_C_COMPILER=afl-cc \
+            -DCMAKE_CXX_COMPILER=afl-c++ \
+            -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
+          make -j"$(nproc)"
+          BINDIR="$PWD/bin"
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "[+] Built binaries:"
+          ls -la "$BINDIR"
+          test -x "$BINDIR/opj_decompress"
+          test -x "$BINDIR/opj_compress"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -u
+          mkdir -p results/dry_run
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+
+          # Map a seed (named after its CVE) to the exact recorded invocation.
+          # Echoes: <binary-basename>|<full command with $POC already substituted>
+          run_seed () {
+            local cve="$1" poc="$2"
+            case "$cve" in
+              CVE-2016-3183|CVE-2016-9675|CVE-2016-3182)
+                timeout 60 "$BINDIR/opj_decompress" -i "$poc" -o /tmp/out.pgm ;;
+              CVE-2016-5157|CVE-2016-4796|CVE-2016-7163|CVE-2016-8332)
+                timeout 60 "$BINDIR/opj_decompress" -i "$poc" -o /tmp/out.png ;;
+              CVE-2017-14039|CVE-2017-14040)
+                timeout 60 "$BINDIR/opj_compress" -r 20,10,1 -jpip -EPH -SOP -cinema2K 24 -n 1 -i "$poc" -o /tmp/out.j2k ;;
+              CVE-2016-10504)
+                timeout 60 "$BINDIR/opj_compress" -i "$poc" -o /tmp/out.jp2 ;;
+              CVE-2016-10507)
+                timeout 60 "$BINDIR/opj_compress" -i "$poc" -o /tmp/out.j2k ;;
+              CVE-2017-14041)
+                timeout 60 "$BINDIR/opj_compress" -n 1 -i "$poc" -o /tmp/null.j2k ;;
+              *)
+                # Unknown/extra seed: default to the decompress path.
+                timeout 60 "$BINDIR/opj_decompress" -i "$poc" -o /tmp/out.png ;;
+            esac
+          }
+
+          # Choose the binary basename used in result filenames.
+          seed_binary () {
+            case "$1" in
+              CVE-2017-14039|CVE-2017-14040|CVE-2016-10504|CVE-2016-10507|CVE-2017-14041)
+                echo "opj_compress" ;;
+              *) echo "opj_decompress" ;;
+            esac
+          }
+
+          crash_count=0
+          total=0
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname="$(basename "$seed" .bin)"
+            bname="$(seed_binary "$sname")"
+            total=$((total + 1))
+            echo "[*] Replaying $sname via $bname..."
+            set +e
+            run_seed "$sname" "$seed" > /dev/null 2> results/dry_run/.stderr_tmp
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+              echo "  [!] CRASH: $sname (exit=$exit_code)"
+              mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz opj_decompress with AFL++
+        run: |
+          set -u
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          # Drive the primary file-parsing target (opj_decompress). AFL replaces
+          # the input path with @@. Guarded so a target that cannot start does
+          # not fail the whole job.
+          afl-fuzz -i "seeds/$PROJECT" -o results/afl -V "$FUZZ_DURATION" -m none -- \
+            "$BINDIR/opj_decompress" -i @@ -o /tmp/out.png || true
+          echo "[+] Fuzzing finished"
+          ls -la results/afl/default/crashes/ 2>/dev/null || echo "[i] no crashes dir"
+
+      - name: Triage fuzz crashes
+        run: |
+          set -u
+          mkdir -p results/fuzz
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          bname=opj_decompress
+          shopt -s nullglob
+          for crash in results/afl/default/crashes/*; do
+            [ -f "$crash" ] || continue
+            case "$(basename "$crash")" in
+              README.txt) continue ;;
+            esac
+            cid="$(basename "$crash")"
+            safe="${cid//[:,]/_}"
+            echo "[*] Triaging $cid..."
+            set +e
+            timeout 60 "$BINDIR/opj_decompress" -i "$crash" -o /tmp/out.png \
+              > /dev/null 2> "results/fuzz/${bname}_${safe}.txt"
+            set -e
+            cp "$crash" "results/fuzz/${bname}_${safe}.bin"
+          done
+          echo "[+] Triage complete"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-openjpeg
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-openjpeg
+          path: results/
+          retention-days: 30

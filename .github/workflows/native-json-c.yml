@@ -1,0 +1,175 @@
+name: "Fuzz native json-c"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: json-c
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone and build latest json-c with AFL++ + ASan
+        run: |
+          set -e
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/json-c/json-c.git /tmp/src/json-c
+
+          # AFL++ instrumentation + AddressSanitizer (adapted from the recorded
+          # Clang recipe: CC/CXX -> afl-cc/afl-c++, AFL_USE_ASAN=1).
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export LDFLAGS="-fsanitize=address"
+
+          # Keep json-c's real build system (CMake). Build STATIC so the CLI app
+          # (apps/json_parse) is a standalone ELF that AFL can exec directly
+          # without LD_LIBRARY_PATH. Build the bundled apps, which include the
+          # file-input json_parse CLI used as the fuzz target/harness.
+          cmake -S /tmp/src/json-c -B /tmp/src/json-c/build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=afl-cc \
+            -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_APPS=ON \
+            -DBUILD_TESTING=OFF
+          cmake --build /tmp/src/json-c/build -j"$(nproc)"
+
+          # Locate the built file-input CLI harness (json_parse reads a JSON
+          # file given as an argument and parses it).
+          BIN=""
+          for cand in \
+            /tmp/src/json-c/build/apps/json_parse \
+            /tmp/src/json-c/build/json_parse \
+            /tmp/src/json-c/build/apps/json_pointer; do
+            if [ -f "$cand" ] && file "$cand" | grep -q "ELF"; then
+              BIN="$cand"
+              break
+            fi
+          done
+          if [ -z "$BIN" ]; then
+            echo "[!] Could not locate a built ELF json-c CLI binary"
+            find /tmp/src/json-c/build -type f -executable 2>/dev/null | head -40 || true
+            exit 1
+          fi
+
+          echo "[+] json-c CLI binary: $BIN"
+          file "$BIN"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          echo "BINDIR=$(dirname "$BIN")" >> "$GITHUB_ENV"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set +e
+          mkdir -p results/dry_run
+          bname=$(basename "$BIN")
+          crashes=0
+          total=0
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            total=$((total + 1))
+            echo "[*] Replaying $sname through $bname ..."
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              timeout 60 "$BIN" "$seed" > /dev/null 2> results/dry_run/.stderr_tmp
+            code=$?
+            if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
+              echo "  [!] CRASH: $sname (exit=$code)"
+              mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crashes=$((crashes + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crashes crashes out of $total seeds"
+
+      - name: Fuzz with AFL++
+        run: |
+          mkdir -p results/afl
+          echo "[+] Fuzzing $BIN for ${FUZZ_DURATION}s..."
+          AFL_SKIP_CPUFREQ=1 \
+          AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+          AFL_NO_UI=1 \
+            afl-fuzz -i "seeds/$PROJECT" -o results/afl -V "$FUZZ_DURATION" -m none \
+              -- "$BIN" @@ \
+            || true
+
+      - name: Triage crashes
+        run: |
+          set +e
+          mkdir -p results/fuzz
+          bname=$(basename "$BIN")
+          crash_dir="results/afl/default/crashes"
+          new=0
+          if [ -d "$crash_dir" ]; then
+            for crash in "$crash_dir"/*; do
+              [ -f "$crash" ] || continue
+              cname=$(basename "$crash")
+              [ "$cname" = "README.txt" ] && continue
+              safe=$(echo "$cname" | tr ':,' '__')
+              report="results/fuzz/${bname}_${safe}.txt"
+              echo "[*] Triaging $cname ..."
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+                timeout 60 "$BIN" "$crash" > /dev/null 2> "$report"
+              code=$?
+              if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
+                echo "  [!] NEW CRASH: $cname (exit=$code)"
+                cp "$crash" "results/fuzz/${bname}_${safe}.bin"
+                new=$((new + 1))
+              else
+                rm -f "$report"
+              fi
+            done
+          fi
+          echo "[+] Triage complete: $new reproduced crashes"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-json-c
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-json-c
+          path: results/
+          retention-days: 30

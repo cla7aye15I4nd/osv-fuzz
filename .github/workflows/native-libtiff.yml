@@ -1,0 +1,231 @@
+name: "Fuzz native libtiff"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds (split across all tiff tools)"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: libtiff
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone and build latest libtiff with AFL++ + ASan
+        run: |
+          set -eux
+          git clone --depth 1 https://github.com/vadz/libtiff.git /tmp/libtiff
+          cd /tmp/libtiff
+          # Regenerate configure from configure.ac (autoconf/automake/libtool
+          # were installed by setup_aflpp.sh).
+          ./autogen.sh
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export LDFLAGS="-fsanitize=address"
+          ./configure --disable-shared
+          make -j"$(nproc)"
+          # CLI tools live under /tmp/libtiff/tools
+          BINDIR=/tmp/libtiff/tools
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "[+] Built tools:"
+          for t in tiffcp tiff2pdf tiffcrop rgb2ycbcr; do
+            if [ -x "$BINDIR/$t" ]; then
+              echo "  [+] $BINDIR/$t"
+            else
+              echo "  [!] MISSING: $BINDIR/$t"
+            fi
+          done
+          # Fail early if the core tool did not build.
+          test -x "$BINDIR/tiffcp"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -u
+          BINDIR="${BINDIR:-/tmp/libtiff/tools}"
+          mkdir -p results/dry_run
+          shopt -s nullglob
+
+          # Recorded per-CVE invocations; __POC__ is the seed input path.
+          declare -A INV
+          INV["CVE-2016-10093"]="$BINDIR/tiffcp -i __POC__ /tmp/out.tif"
+          INV["CVE-2016-9453"]="$BINDIR/tiff2pdf __POC__"
+          INV["CVE-2017-5225"]="$BINDIR/tiffcp -p separate __POC__ /tmp/out.tiff"
+          INV["CVE-2018-5360"]="$BINDIR/tiffcp __POC__ /tmp/out.tif"
+          INV["CVE-2016-10092"]="$BINDIR/tiffcrop -i __POC__ /tmp/foo"
+          INV["CVE-2016-5314"]="$BINDIR/rgb2ycbcr __POC__ /dev/null"
+
+          crash_count=0
+          total=0
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+
+            # Map the seed to its recorded invocation by CVE id in the name.
+            # If no CVE matches, replay it through every invocation.
+            cases=()
+            for cve in "${!INV[@]}"; do
+              case "$sname" in *"$cve"*) cases+=("$cve");; esac
+            done
+            if [ "${#cases[@]}" -eq 0 ]; then
+              cases=("${!INV[@]}")
+            fi
+
+            for cve in "${cases[@]}"; do
+              cmd="${INV[$cve]//__POC__/$seed}"
+              bin=$(basename "$(printf '%s' "$cmd" | awk '{print $1}')")
+              rf="results/dry_run/${bin}_${sname}.txt"
+              [ -f "$rf" ] && continue
+              total=$((total + 1))
+              echo "[*] replay $bin <= $sname ($cve)"
+              set +e
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+                timeout 60 bash -c "$cmd" >/dev/null 2>"$rf.tmp"
+              ec=$?
+              set -e
+              if [ "$ec" -ne 0 ] && [ "$ec" -ne 124 ]; then
+                echo "  [!] CRASH: $bin <= $sname (exit=$ec)"
+                mv "$rf.tmp" "$rf"
+                cp "$seed" "results/dry_run/${bin}_${sname}.bin"
+                crash_count=$((crash_count + 1))
+              else
+                rm -f "$rf.tmp"
+              fi
+            done
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -u
+          BINDIR="${BINDIR:-/tmp/libtiff/tools}"
+          mkdir -p results/afl
+          shopt -s nullglob
+
+          # afl-fuzz needs a non-empty input corpus; provide a minimal one if
+          # the seed download was skipped (e.g. secrets unavailable).
+          if [ -z "$(ls -A "seeds/$PROJECT" 2>/dev/null)" ]; then
+            mkdir -p "seeds/$PROJECT"
+            printf 'II*\000' > "seeds/$PROJECT/min.bin"
+          fi
+
+          # label|command   (@@ is replaced by AFL with each test input)
+          FTARGETS=(
+            "tiffcp_i|$BINDIR/tiffcp -i @@ /tmp/out.tif"
+            "tiff2pdf|$BINDIR/tiff2pdf @@"
+            "tiffcp_separate|$BINDIR/tiffcp -p separate @@ /tmp/out.tiff"
+            "tiffcp|$BINDIR/tiffcp @@ /tmp/out.tif"
+            "tiffcrop|$BINDIR/tiffcrop -i @@ /tmp/foo"
+            "rgb2ycbcr|$BINDIR/rgb2ycbcr @@ /dev/null"
+          )
+
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_NO_UI=1
+
+          n=${#FTARGETS[@]}
+          per=$((FUZZ_DURATION / n))
+          [ "$per" -lt 60 ] && per=60
+          echo "[+] Fuzzing $n targets for ${per}s each (budget ${FUZZ_DURATION}s)"
+
+          for entry in "${FTARGETS[@]}"; do
+            label="${entry%%|*}"
+            cmd="${entry#*|}"
+            echo "[*] afl-fuzz $label for ${per}s :: $cmd"
+            # -m none is required with AddressSanitizer builds.
+            # Guarded so a target that cannot start never fails the job.
+            timeout $((per + 60)) \
+              afl-fuzz -i "seeds/$PROJECT" -o "results/afl/$label" \
+              -V "$per" -m none -- $cmd || true
+          done || true
+
+      - name: Triage AFL++ crashes
+        run: |
+          set -u
+          BINDIR="${BINDIR:-/tmp/libtiff/tools}"
+          mkdir -p results/fuzz
+          shopt -s nullglob
+
+          FTARGETS=(
+            "tiffcp_i|$BINDIR/tiffcp -i @@ /tmp/out.tif"
+            "tiff2pdf|$BINDIR/tiff2pdf @@"
+            "tiffcp_separate|$BINDIR/tiffcp -p separate @@ /tmp/out.tiff"
+            "tiffcp|$BINDIR/tiffcp @@ /tmp/out.tif"
+            "tiffcrop|$BINDIR/tiffcrop -i @@ /tmp/foo"
+            "rgb2ycbcr|$BINDIR/rgb2ycbcr @@ /dev/null"
+          )
+
+          new_crashes=0
+          for entry in "${FTARGETS[@]}"; do
+            label="${entry%%|*}"
+            cmd="${entry#*|}"
+            bin=$(basename "$(printf '%s' "$cmd" | awk '{print $1}')")
+            cdir="results/afl/$label/default/crashes"
+            [ -d "$cdir" ] || continue
+            for cf in "$cdir"/*; do
+              [ -f "$cf" ] || continue
+              case "$(basename "$cf")" in README.txt) continue;; esac
+              cid=$(basename "$cf" | tr ':,' '__')
+              rf="results/fuzz/${bin}_${label}_${cid}.txt"
+              rcmd="${cmd//@@/$cf}"
+              set +e
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+                timeout 60 bash -c "$rcmd" >/dev/null 2>"$rf"
+              ec=$?
+              set -e
+              if [ "$ec" -ne 0 ] && [ "$ec" -ne 124 ]; then
+                echo "  [!] NEW CRASH: $bin ($label) <= $cid"
+                cp "$cf" "results/fuzz/${bin}_${label}_${cid}.bin"
+                new_crashes=$((new_crashes + 1))
+              else
+                rm -f "$rf"
+              fi
+            done
+          done
+          echo "[+] Triage complete: $new_crashes reproduced crashes"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-libtiff
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-libtiff
+          path: results/
+          retention-days: 30

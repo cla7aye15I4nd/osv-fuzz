@@ -1,0 +1,202 @@
+name: "Fuzz native gnutls"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: gnutls
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Install gnutls build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            git autoconf automake libtool pkg-config gettext autopoint \
+            bison gperf make wget clang \
+            libgmp-dev nettle-dev libunistring-dev libidn2-dev \
+            2>/dev/null || true
+
+      - name: Clone and build gnutls with AFL++ + ASan
+        run: |
+          set -eux
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export CXXFLAGS="$CFLAGS"
+          export LDFLAGS="-fsanitize=address"
+
+          export SRC=/tmp/src/gnutls
+          rm -rf "$SRC"
+          mkdir -p /tmp/src
+          git clone --depth=1 https://github.com/gnutls/gnutls "$SRC"
+          cd "$SRC"
+
+          # Build from git: fetch gnulib and generate ./configure
+          ./bootstrap
+
+          # --enable-fuzzer-target builds the fuzz/ targets; use bundled
+          # libtasn1 + libunistring and drop p11-kit/docs to stay self-contained.
+          ./configure --enable-fuzzer-target --disable-doc \
+            --disable-hardware-acceleration \
+            --without-p11-kit --with-included-libtasn1 --with-included-unistring \
+            --disable-maintainer-mode
+
+          # Library + CLI tools (certtool lands at src/certtool).
+          make -j"$(nproc)"
+
+          # Standalone file-driver fuzz target (fuzz/main.c reads argv paths).
+          make -j"$(nproc)" -C fuzz gnutls_psk_client_fuzzer
+
+          # Record binary paths for later steps.
+          echo "SRC=$SRC" >> "$GITHUB_ENV"
+          echo "BINDIR=$SRC" >> "$GITHUB_ENV"
+          echo "CERTTOOL=$SRC/src/certtool" >> "$GITHUB_ENV"
+          echo "PSK_FUZZER=$SRC/fuzz/gnutls_psk_client_fuzzer" >> "$GITHUB_ENV"
+
+          echo "[+] Built binaries:"
+          ls -la "$SRC/src/certtool" "$SRC/fuzz/gnutls_psk_client_fuzzer"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          mkdir -p results/dry_run
+          shopt -s nullglob
+
+          # Each target: "name|binary|prefix-args" where the seed path is
+          # appended after prefix-args (certtool uses --infile, the fuzzer
+          # takes a positional path).
+          targets=(
+            "certtool|$CERTTOOL|--verify-chain --infile"
+            "gnutls_psk_client_fuzzer|$PSK_FUZZER|"
+          )
+
+          crash_count=0
+          total=0
+          for entry in "${targets[@]}"; do
+            IFS='|' read -r bname bin args <<< "$entry"
+            if [ ! -x "$bin" ]; then
+              echo "[!] Missing binary for $bname ($bin) — skipping"
+              continue
+            fi
+            for seed in seeds/"$PROJECT"/*.bin; do
+              [ -f "$seed" ] || continue
+              sname=$(basename "$seed" .bin)
+              result_file="results/dry_run/${bname}_${sname}.txt"
+              total=$((total + 1))
+              echo "[*] Replaying $bname with $sname..."
+              set +e
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+                timeout 60 "$bin" $args "$seed" > /dev/null 2> results/dry_run/.stderr_tmp
+              exit_code=$?
+              set -e
+              if [ $exit_code -ne 0 ] && [ $exit_code -ne 124 ]; then
+                echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
+                mv results/dry_run/.stderr_tmp "$result_file"
+                cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+                crash_count=$((crash_count + 1))
+              else
+                rm -f results/dry_run/.stderr_tmp
+              fi
+            done
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          mkdir -p results
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+
+          # Ensure the input dir has at least one seed so afl-fuzz can start.
+          if [ -z "$(ls -A seeds/$PROJECT 2>/dev/null)" ]; then
+            mkdir -p seeds/"$PROJECT"
+            printf '\x30\x00' > seeds/"$PROJECT"/dummy.bin
+          fi
+
+          # Two file-input targets share the fuzzing budget.
+          per_target=$(( FUZZ_DURATION / 2 ))
+          [ "$per_target" -lt 1 ] && per_target=1
+
+          # afl-fuzz replaces @@ with the input path; certtool takes it via
+          # --infile, the fuzzer as a positional argument.
+          echo "[*] Fuzzing certtool for ${per_target}s..."
+          afl-fuzz -i seeds/"$PROJECT" -o results/afl_certtool -V "$per_target" \
+            -- "$CERTTOOL" --verify-chain --infile @@ || true
+
+          echo "[*] Fuzzing gnutls_psk_client_fuzzer for ${per_target}s..."
+          afl-fuzz -i seeds/"$PROJECT" -o results/afl_psk -V "$per_target" \
+            -- "$PSK_FUZZER" @@ || true
+
+      - name: Triage crashes
+        run: |
+          mkdir -p results/fuzz
+          shopt -s nullglob
+
+          # target name | binary | prefix-args | afl output dir
+          targets=(
+            "certtool|$CERTTOOL|--verify-chain --infile|results/afl_certtool"
+            "gnutls_psk_client_fuzzer|$PSK_FUZZER||results/afl_psk"
+          )
+
+          for entry in "${targets[@]}"; do
+            IFS='|' read -r bname bin args outdir <<< "$entry"
+            crash_dir="$outdir/default/crashes"
+            if [ ! -d "$crash_dir" ]; then
+              echo "[!] No crashes directory found at $crash_dir"
+              continue
+            fi
+            for crash in "$crash_dir"/*; do
+              [ -f "$crash" ] || continue
+              cname=$(basename "$crash")
+              [ "$cname" = "README.txt" ] && continue
+              result_file="results/fuzz/${bname}_${cname}.txt"
+              echo "[*] Triaging $bname / $cname..."
+              set +e
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+                timeout 60 "$bin" $args "$crash" > /dev/null 2> "$result_file"
+              set -e
+              cp "$crash" "results/fuzz/${bname}_${cname}.bin"
+            done
+          done
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-gnutls
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-gnutls
+          path: results/
+          retention-days: 30

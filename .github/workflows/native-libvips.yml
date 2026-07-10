@@ -1,0 +1,199 @@
+name: "Fuzz native libvips"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: libvips
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find seeds/${PROJECT}/ -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la seeds/${PROJECT}/ 2>/dev/null | head -40 || true
+
+      - name: Install AFL++
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Build libvips (latest master) with AFL++ + ASan
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+
+          # --- libvips build deps (Meson + image codecs) ---
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config meson ninja-build \
+            libglib2.0-dev libexpat1-dev \
+            libtiff-dev libpng-dev libjpeg-dev libwebp-dev libexif-dev \
+            libheif-dev
+          # HEIF decoder/encoder plugins are best-effort (universe repo).
+          sudo apt-get install -y libheif-plugin-x265 libheif-plugin-libde265 || true
+
+          # --- latest upstream source ---
+          mkdir -p /tmp/src
+          rm -rf /tmp/src/libvips
+          git clone --depth 1 https://github.com/libvips/libvips.git /tmp/src/libvips
+          cd /tmp/src/libvips
+
+          # --- AFL++ instrumentation + AddressSanitizer ---
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export AFL_SKIP_CPUFREQ=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export CXXFLAGS="$CFLAGS"
+          export LDFLAGS="-fsanitize=address"
+
+          meson setup build --buildtype=debug \
+            -Db_lundef=false \
+            --prefix "$PWD/install"
+          meson compile -C build
+
+          # Built CLI lives in the build tree (rpath points at the built libvips.so).
+          BINDIR="/tmp/src/libvips/build/tools"
+          if [ ! -x "$BINDIR/vips" ]; then
+            echo "[!] vips CLI was not built at $BINDIR/vips"
+            find /tmp/src/libvips/build -name vips -maxdepth 4 -type f 2>/dev/null || true
+            exit 1
+          fi
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "[+] Built vips:"
+          ls -la "$BINDIR/vips"
+          "$BINDIR/vips" --version || true
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -u
+          mkdir -p results/dry_run
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+          shopt -s nullglob
+
+          crash_count=0
+          total=0
+          for seed in seeds/${PROJECT}/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            POC="$seed"
+            result_file="results/dry_run/vips_${sname}.txt"
+            total=$((total + 1))
+            echo "[*] Replaying $sname ..."
+
+            set +e
+            case "$sname" in
+              *3147*)
+                timeout 60 "$BINDIR/vips" csvload --whitespace='😀' "$POC" /tmp/out.v \
+                  > /dev/null 2> /tmp/dry_err.txt ;;
+              *29769*)
+                timeout 60 "$BINDIR/vips" copy "$POC" /tmp/out.heif \
+                  > /dev/null 2> /tmp/dry_err.txt ;;
+              *3282*)
+                timeout 60 "$BINDIR/vips" unpremultiply "$POC" /tmp/out.png --alpha-band 10 \
+                  > /dev/null 2> /tmp/dry_err.txt ;;
+              *3146*)
+                timeout 60 "$BINDIR/vips" matrixload "$POC" /tmp/out.v \
+                  > /dev/null 2> /tmp/dry_err.txt ;;
+              *3145*)
+                PATH="$BINDIR:$PATH" timeout 60 sh "$POC" \
+                  > /dev/null 2> /tmp/dry_err.txt ;;
+              *3281*)
+                timeout 60 "$BINDIR/vips" bandrank "$POC $POC" /tmp/out.png --index 4 \
+                  > /dev/null 2> /tmp/dry_err.txt ;;
+              *3283*)
+                VIPS="$BINDIR/vips" timeout 60 bash "$POC" \
+                  > /dev/null 2> /tmp/dry_err.txt ;;
+              *3284*)
+                VIPS="$BINDIR/vips" timeout 60 bash "$POC" \
+                  > /dev/null 2> /tmp/dry_err.txt ;;
+              *)
+                # Generic loader-driven fallback for any other seed.
+                timeout 60 "$BINDIR/vips" copy "$POC" /tmp/out.v \
+                  > /dev/null 2> /tmp/dry_err.txt ;;
+            esac
+            code=$?
+            set -e
+
+            if [ $code -ne 0 ] && [ $code -ne 124 ]; then
+              echo "  [!] CRASH: $sname (exit=$code)"
+              cp /tmp/dry_err.txt "$result_file"
+              cp "$seed" "results/dry_run/vips_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            fi
+            rm -f /tmp/dry_err.txt
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -u
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+          # Drive the generic loader path; @@ is the AFL-mutated input file.
+          afl-fuzz -i seeds/${PROJECT} -o results/afl -m none -V "$FUZZ_DURATION" \
+            -- "$BINDIR/vips" copy @@ /tmp/out.v || true
+          echo "[+] Fuzzing step finished"
+
+      - name: Triage AFL crashes under ASan
+        run: |
+          set -u
+          mkdir -p results/fuzz
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+          shopt -s nullglob
+
+          n=0
+          for crash in results/afl/default/crashes/*; do
+            [ -f "$crash" ] || continue
+            cname=$(basename "$crash")
+            [ "$cname" = "README.txt" ] && continue
+            result_file="results/fuzz/vips_${cname}.txt"
+            echo "[*] Triaging $cname ..."
+            set +e
+            timeout 60 "$BINDIR/vips" copy "$crash" /tmp/out.v \
+              > /dev/null 2> "$result_file"
+            set -e
+            cp "$crash" "results/fuzz/vips_${cname}.bin"
+            n=$((n + 1))
+          done
+          echo "[+] Triaged $n crashing inputs"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-libvips
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-libvips
+          path: results/
+          retention-days: 30

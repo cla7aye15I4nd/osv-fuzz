@@ -1,0 +1,209 @@
+name: "Fuzz native flac"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 9 * * 0"
+
+env:
+  PROJECT: flac
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            autoconf \
+            automake \
+            libtool \
+            unzip
+
+      - name: Clone and build latest flac with AFL++ + ASan
+        run: |
+          set -eux
+          # Build flac's OSS-Fuzz encoder harness (fuzzer_encoder) with AFL++
+          # compilers + AddressSanitizer. afl-c++ detects the configure-default
+          # LIB_FUZZING_ENGINE (-fsanitize=fuzzer) and links AFL++'s own driver,
+          # producing an AFL-instrumented binary that reads its input from a
+          # file argument (@@) and can also be run standalone as `bin <file>`.
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address,fuzzer-no-link -fno-omit-frame-pointer"
+          export CXXFLAGS="$CFLAGS"
+          # LIB_FUZZING_ENGINE left unset: configure defaults it to
+          # -fsanitize=fuzzer for --enable-oss-fuzzers under Clang/afl-c++.
+
+          mkdir -p /tmp/src
+          rm -rf /tmp/src/flac
+          git clone --depth 1 https://github.com/xiph/flac.git /tmp/src/flac
+          cd /tmp/src/flac
+          ./autogen.sh
+          ./configure --enable-oss-fuzzers --enable-static --disable-shared \
+                      --disable-examples --disable-doxygen-docs
+          make -j"$(nproc)"
+
+          # Fuzzer harness binaries land in oss-fuzz/ ; we drive fuzzer_encoder.
+          BINDIR="$PWD/oss-fuzz"
+          BIN="$BINDIR/fuzzer_encoder"
+          if [ ! -x "$BIN" ]; then
+            echo "[!] fuzzer_encoder not found at $BIN — build failed"
+            ls -la "$BINDIR" || true
+            exit 1
+          fi
+          echo "[+] BINDIR=$BINDIR"
+          echo "[+] BIN=$BIN"
+          file "$BIN"
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Prepare raw corpus for fuzzing
+        run: |
+          set -u
+          # The recorded PoC invocation unzips a libFuzzer crash file
+          # (crash-fuzzer_encoder) out of the seed before feeding it to the
+          # harness, so the R2 .bin seeds are the original crash ZIPs. AFL and
+          # the harness need the *raw* crash bytes, so extract each seed here.
+          # Fall back to copying the seed verbatim if it is not a ZIP.
+          mkdir -p seeds_raw
+          shopt -s nullglob
+          n=0
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            out="seeds_raw/$sname"
+            if unzip -p "$seed" crash-fuzzer_encoder > "$out" 2>/dev/null && [ -s "$out" ]; then
+              echo "[+] Extracted crash-fuzzer_encoder from $sname"
+            else
+              cp "$seed" "$out"
+              echo "[+] Using $sname verbatim (not a ZIP)"
+            fi
+            n=$((n + 1))
+          done
+          if [ "$n" -eq 0 ]; then
+            # AFL needs a non-empty input dir to start; provide a tiny seed.
+            printf 'fLaC' > seeds_raw/default_seed
+          fi
+          echo "[+] Prepared $n raw seed(s) in seeds_raw/"
+          ls -la seeds_raw/ || true
+
+      - name: Dry-run replay of lost-bug PoC seeds
+        run: |
+          set -u
+          mkdir -p results/dry_run
+          bname=$(basename "$BIN")
+          crash_count=0
+          total=0
+          shopt -s nullglob
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            result_file="results/dry_run/${bname}_${sname}.txt"
+            total=$((total + 1))
+            echo "[*] Replaying recorded invocation for $sname..."
+            # Recorded invocation:
+            #   unzip -p "$POC" crash-fuzzer_encoder > /tmp/flac_crash-fuzzer_encoder
+            #   "$BINDIR/fuzzer_encoder" /tmp/flac_crash-fuzzer_encoder
+            POC="$seed"
+            input="/tmp/flac_input_${sname}"
+            if ! (unzip -p "$POC" crash-fuzzer_encoder > "$input" 2>/dev/null && [ -s "$input" ]); then
+              cp "$POC" "$input"
+            fi
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              timeout 60 "$BIN" "$input" > /dev/null 2> results/dry_run/.stderr_tmp
+            exit_code=$?
+            set -e
+            if [ $exit_code -ne 0 ] && [ $exit_code -ne 124 ]; then
+              echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
+              mv results/dry_run/.stderr_tmp "$result_file"
+              cp "$input" "results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -u
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          # fuzzer_encoder reads its input from a file argument -> use AFL's @@.
+          afl-fuzz -i seeds_raw -o results/afl -m none \
+            -V "$FUZZ_DURATION" -- "$BIN" @@ || true
+
+      - name: Triage AFL crashes
+        run: |
+          set -u
+          mkdir -p results/fuzz
+          bname=$(basename "$BIN")
+          shopt -s nullglob
+          crash_dir="results/afl/default/crashes"
+          if [ ! -d "$crash_dir" ]; then
+            echo "[+] No crashes directory produced by AFL"
+            exit 0
+          fi
+          count=0
+          for crash_file in "$crash_dir"/*; do
+            [ -f "$crash_file" ] || continue
+            case "$(basename "$crash_file")" in
+              README.txt) continue ;;
+            esac
+            crash_id=$(basename "$crash_file" | tr ':,' '__')
+            result_file="results/fuzz/${bname}_${crash_id}.txt"
+            echo "[*] Triaging $crash_id..."
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              timeout 60 "$BIN" "$crash_file" > /dev/null 2> "$result_file"
+            set -e
+            cp "$crash_file" "results/fuzz/${bname}_${crash_id}.bin"
+            count=$((count + 1))
+          done
+          echo "[+] Triaged $count crashing inputs"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-flac
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-flac
+          path: results/
+          retention-days: 30

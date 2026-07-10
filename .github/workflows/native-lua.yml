@@ -1,0 +1,149 @@
+name: "Fuzz native lua"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: lua
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone and build lua with AFL++ + ASan
+        run: |
+          set -eux
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/lua/lua /tmp/src/lua
+          cd /tmp/src/lua
+
+          # Lua uses a plain hand-written makefile; source files and the
+          # makefile live at the repo root. Build the standalone "lua"
+          # interpreter with AFL++ instrumentation + AddressSanitizer.
+          # The makefile honors CC / MYCFLAGS / MYLDFLAGS / MYLIBS.
+          export AFL_USE_ASAN=1
+          make -j"$(nproc)" \
+            CC=afl-cc \
+            MYCFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c99 -DLUA_USE_LINUX" \
+            MYLDFLAGS="-fsanitize=address" \
+            MYLIBS="-ldl"
+
+          BINDIR="$PWD"
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "LUA_BIN=$BINDIR/lua" >> "$GITHUB_ENV"
+
+          echo "[+] Built binaries:"
+          ls -la "$BINDIR"/lua* || true
+          test -x "$BINDIR/lua"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -u
+          mkdir -p results/dry_run
+          bin="$LUA_BIN"
+          bname=$(basename "$bin")
+          crash_count=0
+          total=0
+          for seed in seeds/"$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            total=$((total + 1))
+            echo "[*] Replaying $bname with $sname..."
+            set +e
+            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+              timeout 60 "$bin" "$seed" > /dev/null 2> results/dry_run/.stderr_tmp
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+              echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
+              mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total seeds"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -u
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export ASAN_OPTIONS="abort_on_error=1:detect_leaks=0:symbolize=1"
+          echo "[*] Fuzzing for $FUZZ_DURATION seconds..."
+          afl-fuzz -i seeds/"$PROJECT" -o results/afl -V "$FUZZ_DURATION" \
+            -- "$LUA_BIN" @@ || true
+          echo "[+] Fuzzing step finished"
+
+      - name: Triage AFL++ crashes
+        run: |
+          set -u
+          mkdir -p results/fuzz
+          bin="$LUA_BIN"
+          bname=$(basename "$bin")
+          crash_dir=results/afl/default/crashes
+          if [ ! -d "$crash_dir" ]; then
+            echo "[+] No crashes directory found — nothing to triage"
+            exit 0
+          fi
+          n=0
+          for crash in "$crash_dir"/*; do
+            [ -f "$crash" ] || continue
+            cname=$(basename "$crash")
+            [ "$cname" = "README.txt" ] && continue
+            n=$((n + 1))
+            echo "[*] Triaging $cname..."
+            set +e
+            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0:symbolize=1" \
+              timeout 60 "$bin" "$crash" > /dev/null 2> "results/fuzz/${bname}_${cname}.txt"
+            set -e
+            cp "$crash" "results/fuzz/${bname}_${cname}.bin"
+          done
+          echo "[+] Triaged $n crash inputs"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-lua
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-lua
+          path: results/
+          retention-days: 30

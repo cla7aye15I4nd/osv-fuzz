@@ -1,0 +1,252 @@
+name: "Fuzz native liblouis"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: liblouis
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone and build latest liblouis with AFL++ + ASan
+        run: |
+          set -eux
+          # Autotools-from-git needs these to run ./autogen.sh and `make`.
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get install -y -qq \
+            gettext autopoint texinfo help2man 2>/dev/null || true
+
+          # Build liblouis (latest master) with AFL++ compilers + AddressSanitizer.
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export CXXFLAGS="$CFLAGS"
+          export LDFLAGS="-fsanitize=address"
+
+          export SRC=/tmp/src
+          mkdir -p "$SRC"
+          rm -rf "$SRC/liblouis"
+          git clone --depth 1 https://github.com/liblouis/liblouis.git "$SRC/liblouis"
+          cd "$SRC/liblouis"
+          ./autogen.sh
+          # Static link so the freshly built instrumented liblouis is baked into
+          # each CLI tool -> the tools/ binaries are standalone ASan ELFs that
+          # AFL's forkserver can attach to (no libtool wrapper, no rpath games).
+          ./configure --disable-shared --enable-static
+          make -j"$(nproc)"
+
+          BINDIR="$PWD"
+
+          # Resolve each CLI tool to its real ELF. With --disable-shared the tool
+          # in tools/ is already the ELF; fall back to .libs/ if a libtool wrapper
+          # script was produced anyway.
+          resolve_bin () {
+            local name="$1"
+            if [ -x "$BINDIR/tools/.libs/$name" ] && \
+               file "$BINDIR/tools/.libs/$name" | grep -q ELF; then
+              echo "$BINDIR/tools/.libs/$name"
+            else
+              echo "$BINDIR/tools/$name"
+            fi
+          }
+
+          BIN_CHECKTABLE="$(resolve_bin lou_checktable)"
+          BIN_TRACE="$(resolve_bin lou_trace)"
+          BIN_TRANSLATE="$(resolve_bin lou_translate)"
+          TABLES="$BINDIR/tables"
+
+          for b in "$BIN_CHECKTABLE" "$BIN_TRACE" "$BIN_TRANSLATE"; do
+            echo "[+] target: $b"; file "$b"
+          done
+
+          {
+            echo "SRC=$SRC"
+            echo "BINDIR=$BINDIR"
+            echo "BIN_CHECKTABLE=$BIN_CHECKTABLE"
+            echo "BIN_TRACE=$BIN_TRACE"
+            echo "BIN_TRANSLATE=$BIN_TRANSLATE"
+            echo "TABLES=$TABLES"
+            # Defensive: if a shared lib was still produced, let the ELF find it.
+            echo "LD_LIBRARY_PATH=$BINDIR/liblouis/.libs:${LD_LIBRARY_PATH:-}"
+          } >> "$GITHUB_ENV"
+
+      - name: Dry-run replay of lost-bug PoC seeds
+        run: |
+          set -u
+          mkdir -p results/dry_run
+          crash_count=0
+          total=0
+          shopt -s nullglob
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            # Map each PoC to the tool/invocation that originally triggered it.
+            #   CVE-2022-26981 -> lou_checktable  <file>
+            #   CVE-2022-31783 -> lou_trace       <file>
+            #   CVE-2018-17294 -> lou_translate   hu-hu-g2.ctb < <file>
+            case "$sname" in
+              *26981*) key=lou_checktable ;;
+              *31783*) key=lou_trace ;;
+              *17294*) key=lou_translate ;;
+              *)       key=lou_checktable ;;
+            esac
+            result_file="results/dry_run/${key}_${sname}.txt"
+            total=$((total + 1))
+            echo "[*] Replaying $key with $sname..."
+            set +e
+            case "$key" in
+              lou_checktable)
+                ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+                  timeout 60 "$BIN_CHECKTABLE" "$seed" > /dev/null 2> results/dry_run/.stderr_tmp ;;
+              lou_trace)
+                ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+                  timeout 60 "$BIN_TRACE" "$seed" > /dev/null 2> results/dry_run/.stderr_tmp ;;
+              lou_translate)
+                ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 LOUIS_TABLEPATH="$TABLES" \
+                  timeout 60 "$BIN_TRANSLATE" hu-hu-g2.ctb < "$seed" > /dev/null 2> results/dry_run/.stderr_tmp ;;
+            esac
+            exit_code=$?
+            set -e
+            if [ $exit_code -ne 0 ] && [ $exit_code -ne 124 ]; then
+              echo "  [!] CRASH: $key with $sname (exit=$exit_code)"
+              mv results/dry_run/.stderr_tmp "$result_file"
+              cp "$seed" "results/dry_run/${key}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -u
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          mkdir -p results/afl
+          # Split the budget across the three CLI tools (min 60s each).
+          per=$(( FUZZ_DURATION / 3 ))
+          [ "$per" -lt 60 ] && per=60
+
+          run_afl () {
+            local key="$1" pat="$2"
+            local indir="results/in/$key" outdir="results/afl/$key"
+            mkdir -p "$indir" "$outdir"
+            shopt -s nullglob
+            local n=0 s
+            for s in seeds/$PROJECT/$pat; do
+              [ -f "$s" ] && cp "$s" "$indir/" && n=$((n + 1))
+            done
+            # Fallback: seed with everything, then a minimal input if still empty.
+            if [ "$n" -eq 0 ]; then
+              for s in seeds/$PROJECT/*.bin; do [ -f "$s" ] && cp "$s" "$indir/"; done
+            fi
+            if ! ls "$indir"/* >/dev/null 2>&1; then printf 'a' > "$indir/seed"; fi
+            echo "[*] Fuzzing $key for ${per}s..."
+            case "$key" in
+              lou_checktable)
+                afl-fuzz -i "$indir" -o "$outdir" -m none -V "$per" \
+                  -- "$BIN_CHECKTABLE" @@ || true ;;
+              lou_trace)
+                afl-fuzz -i "$indir" -o "$outdir" -m none -V "$per" \
+                  -- "$BIN_TRACE" @@ || true ;;
+              lou_translate)
+                # Reads the document from stdin -> no @@, AFL feeds the testcase in.
+                LOUIS_TABLEPATH="$TABLES" \
+                afl-fuzz -i "$indir" -o "$outdir" -m none -V "$per" \
+                  -- "$BIN_TRANSLATE" hu-hu-g2.ctb || true ;;
+            esac
+          }
+
+          run_afl lou_checktable '*26981*'
+          run_afl lou_trace      '*31783*'
+          run_afl lou_translate  '*17294*'
+
+      - name: Triage AFL crashes
+        run: |
+          set -u
+          mkdir -p results/fuzz
+          shopt -s nullglob
+          new_crashes=0
+          for key in lou_checktable lou_trace lou_translate; do
+            crash_dir="results/afl/$key/default/crashes"
+            [ -d "$crash_dir" ] || continue
+            for crash_file in "$crash_dir"/*; do
+              [ -f "$crash_file" ] || continue
+              case "$(basename "$crash_file")" in
+                README.txt) continue ;;
+              esac
+              crash_id=$(basename "$crash_file" | tr ':,' '__')
+              result_file="results/fuzz/${key}_${crash_id}.txt"
+              set +e
+              case "$key" in
+                lou_checktable)
+                  ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+                    timeout 60 "$BIN_CHECKTABLE" "$crash_file" > /dev/null 2> "$result_file" ;;
+                lou_trace)
+                  ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+                    timeout 60 "$BIN_TRACE" "$crash_file" > /dev/null 2> "$result_file" ;;
+                lou_translate)
+                  ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 LOUIS_TABLEPATH="$TABLES" \
+                    timeout 60 "$BIN_TRANSLATE" hu-hu-g2.ctb < "$crash_file" > /dev/null 2> "$result_file" ;;
+              esac
+              replay_exit=$?
+              set -e
+              if [ $replay_exit -ne 0 ] && [ $replay_exit -ne 124 ]; then
+                echo "  [!] NEW CRASH: $key $crash_id (exit=$replay_exit)"
+                cp "$crash_file" "results/fuzz/${key}_${crash_id}.bin"
+                new_crashes=$((new_crashes + 1))
+              else
+                rm -f "$result_file"
+              fi
+            done
+          done
+          echo "[+] Triage complete: $new_crashes reproduced crashes"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-liblouis
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-liblouis
+          path: results/
+          retention-days: 30

@@ -1,0 +1,183 @@
+name: "Fuzz native openbabel"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: openbabel
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          export DEBIAN_FRONTEND=noninteractive
+          # OpenBabel build deps; libxml2-dev needed for CDXML/CML plugins
+          sudo apt-get install -y -qq \
+            libxml2-dev zlib1g-dev libeigen3-dev 2>/dev/null || true
+
+      - name: Clone latest upstream openbabel
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/vedantmadane/openbabel /tmp/src/openbabel
+
+      - name: Build openbabel with AFL++ + ASan
+        run: |
+          set -eux
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          cd /tmp/src/openbabel
+          mkdir -p build && cd build
+          cmake .. \
+            -DCMAKE_C_COMPILER=afl-cc -DCMAKE_CXX_COMPILER=afl-c++ \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address" \
+            -DBUILD_SHARED=ON -DENABLE_TESTS=OFF -DWITH_INCHI=ON
+          make -j"$(nproc)"
+          # Record binary + plugin/data locations for later steps
+          BINDIR="$PWD/bin"
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "OBABEL=$BINDIR/obabel" >> "$GITHUB_ENV"
+          test -x "$BINDIR/obabel"
+          echo "[+] Built obabel: $BINDIR/obabel"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -u
+          mkdir -p results/dry_run
+          bin="obabel"
+          # Each recorded CVE invocation, keyed by input format flag.
+          # Seeds are format-agnostic .bin files, so replay every seed
+          # through every format invocation.
+          formats=("-imol2" "-icdxml" "-icif")
+          crash_count=0
+          total=0
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            for infmt in "${formats[@]}"; do
+              fmt_tag=$(echo "$infmt" | tr -d '-')
+              result_file="results/dry_run/${bin}_${fmt_tag}_${sname}.txt"
+              total=$((total + 1))
+              echo "[*] Replay $bin ($infmt) with $sname..."
+              set +e
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              BABEL_LIBDIR="$BINDIR/../lib" \
+              BABEL_DATADIR="$BINDIR/../../data" \
+              timeout 60 "$OBABEL" "$infmt" "$seed" -osmi -O /dev/null \
+                > /dev/null 2> "results/dry_run/.stderr_tmp"
+              exit_code=$?
+              set -e
+              if [ $exit_code -ne 0 ] && [ $exit_code -ne 124 ]; then
+                echo "  [!] CRASH: $bin ($infmt) with $sname (exit=$exit_code)"
+                mv "results/dry_run/.stderr_tmp" "$result_file"
+                cp "$seed" "results/dry_run/${bin}_${fmt_tag}_${sname}.bin"
+                crash_count=$((crash_count + 1))
+              else
+                rm -f "results/dry_run/.stderr_tmp"
+              fi
+            done
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -u
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_NO_UI=1
+          export BABEL_LIBDIR="$BINDIR/../lib"
+          export BABEL_DATADIR="$BINDIR/../../data"
+          # Split the budget across the three format targets (min 60s each).
+          per_target=$((FUZZ_DURATION / 3))
+          [ "$per_target" -lt 60 ] && per_target=60
+          for infmt in -imol2 -icdxml -icif; do
+            fmt_tag=$(echo "$infmt" | tr -d '-')
+            out="results/afl/$fmt_tag"
+            echo "[*] Fuzzing obabel $infmt for ${per_target}s..."
+            timeout "$per_target" \
+              afl-fuzz -i "seeds/$PROJECT" -o "$out" -m none -V "$per_target" \
+                -- "$OBABEL" "$infmt" @@ -osmi -O /dev/null || true
+          done
+
+      - name: Triage crashes
+        run: |
+          set -u
+          mkdir -p results/fuzz
+          bin="obabel"
+          export BABEL_LIBDIR="$BINDIR/../lib"
+          export BABEL_DATADIR="$BINDIR/../../data"
+          for infmt in -imol2 -icdxml -icif; do
+            fmt_tag=$(echo "$infmt" | tr -d '-')
+            crash_dir="results/afl/$fmt_tag/default/crashes"
+            [ -d "$crash_dir" ] || continue
+            for crash_file in "$crash_dir"/*; do
+              [ -f "$crash_file" ] || continue
+              case "$(basename "$crash_file")" in
+                README.txt) continue ;;
+              esac
+              crash_name=$(basename "$crash_file" | tr ':,' '__')
+              result_file="results/fuzz/${bin}_${fmt_tag}_${crash_name}.txt"
+              set +e
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              timeout 60 "$OBABEL" "$infmt" "$crash_file" -osmi -O /dev/null \
+                > /dev/null 2> "$result_file"
+              replay_exit=$?
+              set -e
+              if [ $replay_exit -ne 0 ] && [ $replay_exit -ne 124 ]; then
+                echo "  [!] NEW CRASH: $bin ($infmt) $crash_name"
+                cp "$crash_file" "results/fuzz/${bin}_${fmt_tag}_${crash_name}.bin"
+              else
+                rm -f "$result_file"
+              fi
+            done
+          done
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-openbabel
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-openbabel
+          path: results/
+          retention-days: 30

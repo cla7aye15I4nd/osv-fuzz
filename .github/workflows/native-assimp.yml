@@ -1,0 +1,171 @@
+name: "Fuzz native assimp"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 6 * * 1"
+
+env:
+  PROJECT: assimp
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Install extra build deps
+        run: |
+          sudo apt-get install -y -qq ninja-build zlib1g-dev 2>/dev/null || true
+
+      - name: Clone latest upstream source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 --recursive https://github.com/assimp/assimp.git /tmp/src/assimp
+
+      - name: Build assimp + fuzzer harness with AFL++ and ASan
+        run: |
+          set -eux
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+
+          cd /tmp/src/assimp
+          mkdir -p build && cd build
+          cmake .. -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=afl-cc -DCMAKE_CXX_COMPILER=afl-c++ \
+            -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+            -DASSIMP_BUILD_ZLIB=ON \
+            -DASSIMP_BUILD_TESTS=OFF \
+            -DASSIMP_BUILD_ASSIMP_TOOLS=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT=ON \
+            -DASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT=ON
+          ninja
+
+          # Locate the static zlib archive produced by the build (name/path varies).
+          ZLIB_A=$(find . -name 'libzlibstatic.a' -o -name 'libzlib.a' 2>/dev/null | head -1)
+          echo "[+] zlib archive: ${ZLIB_A:-<none, relying on -lz>}"
+
+          # Link the generic OSS-Fuzz fuzzer harness against AFL++ + ASan.
+          # afl-c++ provides the AFL persistent/fork-server main, so no libFuzzer is needed.
+          afl-c++ $CXXFLAGS -I../include -I./include \
+            ../fuzz/assimp_fuzzer.cc -o ./assimp_fuzzer \
+            ./lib/libassimp.a ${ZLIB_A:--lz} -lpthread -ldl
+
+          test -x ./assimp_fuzzer
+          echo "BINDIR=/tmp/src/assimp/build" >> "$GITHUB_ENV"
+          echo "FUZZ_BIN=/tmp/src/assimp/build/assimp_fuzzer" >> "$GITHUB_ENV"
+          echo "[+] Built target: /tmp/src/assimp/build/assimp_fuzzer"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -u
+          mkdir -p results/dry_run
+          bname=$(basename "$FUZZ_BIN")
+          shopt -s nullglob
+          crashes=0
+          total=0
+          for seed in seeds/$PROJECT/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            total=$((total + 1))
+            result_file="results/dry_run/${bname}_${sname}.txt"
+            echo "[*] Replaying $sname through $bname..."
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              timeout 60 "$FUZZ_BIN" "$seed" > /dev/null 2> "results/dry_run/.stderr_tmp"
+            ec=$?
+            set -e
+            if [ $ec -ne 0 ] && [ $ec -ne 124 ]; then
+              echo "  [!] CRASH replaying $sname (exit=$ec)"
+              mv "results/dry_run/.stderr_tmp" "$result_file"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crashes=$((crashes + 1))
+            else
+              rm -f "results/dry_run/.stderr_tmp"
+            fi
+          done
+          echo "[+] Dry run complete: $crashes crashes out of $total seeds"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -u
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_NO_UI=1
+          export AFL_USE_ASAN=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+          # assimp_fuzzer takes an input file path -> use AFL's @@ placeholder.
+          afl-fuzz -i "seeds/$PROJECT" -o results/afl -m none \
+            -V "$FUZZ_DURATION" -- "$FUZZ_BIN" @@ || true
+          echo "[+] Fuzzing step finished"
+
+      - name: Triage AFL crashes under ASan
+        run: |
+          set -u
+          mkdir -p results/fuzz
+          bname=$(basename "$FUZZ_BIN")
+          shopt -s nullglob
+          new=0
+          for crash in results/afl/default/crashes/*; do
+            [ -f "$crash" ] || continue
+            case "$(basename "$crash")" in
+              README.txt) continue ;;
+            esac
+            cid=$(basename "$crash" | tr ':,' '__')
+            result_file="results/fuzz/${bname}_${cid}.txt"
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 \
+              timeout 60 "$FUZZ_BIN" "$crash" > /dev/null 2> "$result_file"
+            ec=$?
+            set -e
+            if [ $ec -ne 0 ] && [ $ec -ne 124 ]; then
+              echo "  [!] NEW CRASH: $cid (exit=$ec)"
+              cp "$crash" "results/fuzz/${bname}_${cid}.bin"
+              new=$((new + 1))
+            else
+              rm -f "$result_file"
+            fi
+          done
+          echo "[+] Triage complete: $new reproducible crashes"
+
+      - name: Generate report
+        if: always()
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-assimp
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-assimp
+          path: results/
+          retention-days: 30

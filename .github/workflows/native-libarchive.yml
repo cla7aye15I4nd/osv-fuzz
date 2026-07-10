@@ -1,0 +1,156 @@
+name: "Fuzz native libarchive"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: libarchive
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone and build latest libarchive with AFL++ + ASan
+        run: |
+          set -e
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/libarchive/libarchive.git /tmp/src/libarchive
+          cd /tmp/src/libarchive
+          # A GitHub checkout ships no ./configure script; regenerate autotools files.
+          /bin/sh build/autogen.sh
+          export AFL_USE_ASAN=1
+          CC=afl-cc CXX=afl-c++ \
+          CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+          CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+          LDFLAGS="-fsanitize=address" \
+            ./configure --disable-shared
+          make -j"$(nproc)"
+          # With --disable-shared the top-level bsdtar is a real ELF binary
+          # (not a libtool wrapper script), which AFL++ can drive directly.
+          BIN="/tmp/src/libarchive/bsdtar"
+          if [ ! -x "$BIN" ]; then
+            echo "[!] Build failed — $BIN not found"
+            exit 1
+          fi
+          echo "BINDIR=/tmp/src/libarchive" >> "$GITHUB_ENV"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          echo "[+] Built target:"
+          ls -la "$BIN"
+          "$BIN" --version || true
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -u
+          mkdir -p results/dry_run
+          bname=$(basename "$BIN")
+          shopt -s nullglob
+          # Contain any extraction output (the -xf PoC writes files) in a sandbox.
+          sandbox="$GITHUB_WORKSPACE/results/dry_run/.sandbox"
+          crash_count=0
+          total=0
+          # Per-CVE recorded invocation. Seeds are named after their CVE id;
+          # anything unmatched falls back to the dominant "-tf" listing mode.
+          for seed in "$GITHUB_WORKSPACE"/seeds/"$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            case "$sname" in
+              *2017-14166*) args=(-tf) ;;
+              *2016-8687*)  args=(-t -f) ;;
+              *2017-14502*) args=(-xf) ;;
+              *2016-8689*)  args=(-tf) ;;
+              *2016-4301*)  args=(-tf) ;;
+              *2016-8688*)  args=(-t -f) ;;
+              *2018-1000877*) args=(-tf) ;;
+              *)            args=(-tf) ;;
+            esac
+            result_file="$GITHUB_WORKSPACE/results/dry_run/${bname}_${sname}.txt"
+            total=$((total + 1))
+            echo "[*] Replaying $bname ${args[*]} with $sname..."
+            rm -rf "$sandbox"; mkdir -p "$sandbox"
+            set +e
+            ( cd "$sandbox" && \
+              ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" LC_ALL=C.UTF-8 \
+              timeout 30 "$BIN" "${args[@]}" "$seed" > /dev/null 2> "$GITHUB_WORKSPACE/results/dry_run/.stderr_tmp" )
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+              echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
+              mv "$GITHUB_WORKSPACE/results/dry_run/.stderr_tmp" "$result_file"
+              cp "$seed" "$GITHUB_WORKSPACE/results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f "$GITHUB_WORKSPACE/results/dry_run/.stderr_tmp"
+            fi
+          done
+          rm -rf "$sandbox"
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -u
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export LC_ALL=C.UTF-8
+          # Drive bsdtar in table-of-contents mode (covers the archive header
+          # parsers hit by the majority of the PoCs); @@ is the archive file.
+          afl-fuzz -i seeds/"$PROJECT" -o results/afl -V "$FUZZ_DURATION" \
+            -- "$BIN" -tf @@ || true
+
+      - name: Triage AFL++ crashes
+        run: |
+          set -u
+          mkdir -p results/fuzz
+          bname=$(basename "$BIN")
+          shopt -s nullglob
+          for crash in results/afl/default/crashes/*; do
+            [ -f "$crash" ] || continue
+            cname=$(basename "$crash")
+            [ "$cname" = "README.txt" ] && continue
+            result_file="results/fuzz/${bname}_${cname}.txt"
+            echo "[*] Triaging $cname..."
+            set +e
+            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" LC_ALL=C.UTF-8 \
+            timeout 30 "$BIN" -tf "$crash" > /dev/null 2> "$result_file"
+            set -e
+            cp "$crash" "results/fuzz/${bname}_${cname}.bin"
+          done
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-libarchive
+          path: results/
+          retention-days: 30
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-libarchive
+          path: results/pocs/
+          retention-days: 90

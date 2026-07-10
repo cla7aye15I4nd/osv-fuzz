@@ -1,0 +1,214 @@
+name: "Fuzz native jasper"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: jasper
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -40 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone and build latest jasper with AFL++ + ASan
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/jasper-software/jasper.git /tmp/src/jasper
+          cd /tmp/src/jasper
+
+          export AFL_USE_ASAN=1
+          # afl-cc/afl-c++ instrument; -fsanitize=address + AFL_USE_ASAN give ASan coverage.
+          cmake -S . -B build \
+            -DCMAKE_C_COMPILER=afl-cc -DCMAKE_CXX_COMPILER=afl-c++ \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
+            -DJAS_ENABLE_SHARED=false \
+            -DJAS_ENABLE_PROGRAMS=true \
+            -DJAS_ENABLE_LIBJPEG=true
+          cmake --build build -j"$(nproc)"
+
+          BINDIR="$PWD/build/src/app"
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "[+] Built binaries:"
+          ls -la "$BINDIR/jasper" "$BINDIR/imginfo"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -uo pipefail
+          mkdir -p results/dry_run
+          : "${BINDIR:?BINDIR not set — build step failed}"
+
+          # Recorded invocations, encoded as "<binary>|<pre-args...>|<post-args...>".
+          # $POC is substituted for the seed path between pre and post args.
+          run_invocation () {
+            local bin="$1"; shift
+            local outfile="$1"; shift
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              timeout 30 "$BINDIR/$bin" "$@" > /dev/null 2> "$outfile"
+            local ec=$?
+            set -e
+            return $ec
+          }
+
+          crash_count=0
+          total=0
+          for seed in seeds/"$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+
+            # Each recorded invocation variant. Fields: binary | args (POC marks seed).
+            # imginfo -f POC ; jasper -f POC -F /tmp/out.jp2 ; jasper -f POC -F /tmp/out.jpc -T jpc
+            for spec in \
+              "imginfo:-f:POC" \
+              "jasper:-f:POC:-F:/tmp/out.jp2" \
+              "jasper:-f:POC:-F:/tmp/out.jpc:-T:jpc"; do
+              IFS=':' read -r -a parts <<< "$spec"
+              bin="${parts[0]}"
+              args=()
+              for a in "${parts[@]:1}"; do
+                if [ "$a" = "POC" ]; then args+=("$seed"); else args+=("$a"); fi
+              done
+              tag="${bin}_${sname}"
+              # Disambiguate the two jasper variants so reports don't overwrite.
+              case "$spec" in
+                *jpc*) tag="${bin}jpc_${sname}" ;;
+              esac
+              result_file="results/dry_run/${tag}.txt"
+              [ -f "$result_file" ] && continue
+              total=$((total + 1))
+              echo "[*] Replaying $bin with $sname..."
+
+              run_invocation "$bin" "$result_file" "${args[@]}"
+              ec=$?
+              if [ "$ec" -ne 0 ] && [ "$ec" -ne 124 ]; then
+                echo "  [!] CRASH: $tag (exit=$ec)"
+                cp "$seed" "results/dry_run/${tag}.bin"
+                crash_count=$((crash_count + 1))
+              else
+                rm -f "$result_file"
+              fi
+            done
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -uo pipefail
+          : "${BINDIR:?BINDIR not set — build step failed}"
+          mkdir -p results/afl
+
+          if [ -z "$(ls -A seeds/"$PROJECT"/*.bin 2>/dev/null)" ]; then
+            echo "[!] No seeds present — creating a minimal seed"
+            mkdir -p seeds/"$PROJECT"
+            printf '\x00' > seeds/"$PROJECT"/minimal.bin
+          fi
+
+          # Two targets share the total budget. imginfo carries most recorded CVEs.
+          half=$(( FUZZ_DURATION / 2 ))
+          [ "$half" -lt 60 ] && half=60
+
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_NO_UI=1
+
+          # imginfo -f @@
+          ( set -x
+            timeout "$half" afl-fuzz -i seeds/"$PROJECT" -o results/afl/imginfo -m none \
+              -V "$half" -- "$BINDIR/imginfo" -f @@ ) || true
+
+          # jasper -f @@ -F /tmp/out.jp2
+          ( set -x
+            timeout "$half" afl-fuzz -i seeds/"$PROJECT" -o results/afl/jasper -m none \
+              -V "$half" -- "$BINDIR/jasper" -f @@ -F /tmp/out.jp2 ) || true
+
+          echo "[+] Fuzzing finished"
+          ls -la results/afl/*/default/crashes/ 2>/dev/null || echo "[+] No crashes directory produced"
+
+      - name: Triage crashes
+        run: |
+          set -uo pipefail
+          : "${BINDIR:?BINDIR not set — build step failed}"
+          mkdir -p results/fuzz
+
+          triage_one () {
+            local bin="$1"; local crash="$2"; shift 2
+            local crashid
+            crashid=$(basename "$crash" | tr ':,' '__')
+            local out="results/fuzz/${bin}_${crashid}.txt"
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              timeout 30 "$BINDIR/$bin" "$@" > /dev/null 2> "$out"
+            local ec=$?
+            set -e
+            if [ "$ec" -ne 0 ] && [ "$ec" -ne 124 ]; then
+              echo "  [!] Reproduced crash: ${bin}_${crashid} (exit=$ec)"
+              cp "$crash" "results/fuzz/${bin}_${crashid}.bin"
+            else
+              rm -f "$out"
+            fi
+          }
+
+          # imginfo crashes
+          for crash in results/afl/imginfo/default/crashes/*; do
+            [ -f "$crash" ] || continue
+            case "$(basename "$crash")" in README.txt) continue ;; esac
+            triage_one imginfo "$crash" -f "$crash"
+          done
+
+          # jasper crashes
+          for crash in results/afl/jasper/default/crashes/*; do
+            [ -f "$crash" ] || continue
+            case "$(basename "$crash")" in README.txt) continue ;; esac
+            triage_one jasper "$crash" -f "$crash" -F /tmp/out.jp2
+          done
+
+          echo "[+] Triage complete"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-jasper
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-jasper
+          path: results/
+          retention-days: 30

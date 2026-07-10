@@ -1,0 +1,179 @@
+name: "Fuzz native mupdf"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: mupdf
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone and build latest mupdf (mutool) with AFL++ + ASan
+        run: |
+          set -e
+          mkdir -p /tmp/src
+          # thirdparty deps are git submodules; --recursive is required.
+          git clone --depth 1 --recurse-submodules --shallow-submodules \
+            https://github.com/ArtifexSoftware/mupdf.git /tmp/src/mupdf
+          cd /tmp/src/mupdf
+          # AFL++ instrumentation + AddressSanitizer.
+          export AFL_USE_ASAN=1
+          # Build only the mutool CLI (no X11/GL GUI). MuPDF's Makefile expects
+          # the X-prefixed flag vars, NOT CFLAGS/LDFLAGS.
+          make -j"$(nproc)" build=debug \
+            HAVE_X11=no HAVE_GLUT=no \
+            CC=afl-cc CXX=afl-c++ \
+            XCFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            XLDFLAGS="-fsanitize=address" \
+            XLIBS="-fsanitize=address" \
+            mutool
+          BINDIR="/tmp/src/mupdf/build/debug"
+          BIN="$BINDIR/mutool"
+          if [ ! -x "$BIN" ]; then
+            echo "[!] Build failed — $BIN not found"
+            exit 1
+          fi
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          echo "[+] Built target:"
+          ls -la "$BIN"
+          "$BIN" -v || true
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -u
+          mkdir -p results/dry_run
+          bname=$(basename "$BIN")
+          shopt -s nullglob
+          # One entry per recorded PoC invocation. @@ marks the input path.
+          LABELS=(clean_sgg convert_cbz clean_full)
+          ARGS=(
+            "clean -sgg @@ /tmp/out.pdf"
+            "convert -F cbz -o /dev/null @@"
+            "clean -gggg -l -a -d -z -f -i @@ /tmp/out.pdf"
+          )
+          crash_count=0
+          total=0
+          for seed in seeds/"$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            for i in "${!LABELS[@]}"; do
+              label="${LABELS[$i]}"
+              # Substitute the seed path for the @@ placeholder.
+              invocation="${ARGS[$i]//@@/$seed}"
+              result_file="results/dry_run/${bname}_${label}_${sname}.txt"
+              total=$((total + 1))
+              echo "[*] Replaying $bname [$label] with $sname..."
+              set +e
+              ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+              timeout 30 "$BIN" $invocation > /dev/null 2> results/dry_run/.stderr_tmp
+              exit_code=$?
+              set -e
+              if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+                echo "  [!] CRASH: $bname [$label] with $sname (exit=$exit_code)"
+                mv results/dry_run/.stderr_tmp "$result_file"
+                cp "$seed" "results/dry_run/${bname}_${label}_${sname}.bin"
+                crash_count=$((crash_count + 1))
+              else
+                rm -f results/dry_run/.stderr_tmp
+              fi
+            done
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -u
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          LABELS=(clean_sgg convert_cbz clean_full)
+          ARGS=(
+            "clean -sgg @@ /tmp/out.pdf"
+            "convert -F cbz -o /dev/null @@"
+            "clean -gggg -l -a -d -z -f -i @@ /tmp/out.pdf"
+          )
+          # Split the total budget across the three invocations (min 60s each).
+          per_target=$(( FUZZ_DURATION / ${#LABELS[@]} ))
+          [ "$per_target" -lt 60 ] && per_target=60
+          echo "[+] Fuzzing ${#LABELS[@]} invocations for ${per_target}s each"
+          for i in "${!LABELS[@]}"; do
+            label="${LABELS[$i]}"
+            echo "[*] Fuzzing invocation [$label] for ${per_target}s..."
+            # @@ is expanded by afl-fuzz to the current test-case path.
+            AFL_SKIP_CPUFREQ=1 \
+            AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+            afl-fuzz -i seeds/"$PROJECT" -o "results/afl/$label" -V "$per_target" \
+              -- "$BIN" ${ARGS[$i]} || true
+          done
+
+      - name: Triage AFL++ crashes
+        run: |
+          set -u
+          mkdir -p results/fuzz
+          bname=$(basename "$BIN")
+          shopt -s nullglob
+          LABELS=(clean_sgg convert_cbz clean_full)
+          ARGS=(
+            "clean -sgg @@ /tmp/out.pdf"
+            "convert -F cbz -o /dev/null @@"
+            "clean -gggg -l -a -d -z -f -i @@ /tmp/out.pdf"
+          )
+          for i in "${!LABELS[@]}"; do
+            label="${LABELS[$i]}"
+            for crash in "results/afl/$label"/default/crashes/*; do
+              [ -f "$crash" ] || continue
+              cname=$(basename "$crash")
+              [ "$cname" = "README.txt" ] && continue
+              safe=$(echo "$cname" | tr ':,' '__')
+              invocation="${ARGS[$i]//@@/$crash}"
+              result_file="results/fuzz/${bname}_${label}_${safe}.txt"
+              echo "[*] Triaging [$label] $cname..."
+              set +e
+              ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+              timeout 30 "$BIN" $invocation > /dev/null 2> "$result_file"
+              set -e
+              cp "$crash" "results/fuzz/${bname}_${label}_${safe}.bin"
+            done
+          done
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-mupdf
+          path: results/
+          retention-days: 30
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-mupdf
+          path: results/pocs/
+          retention-days: 90

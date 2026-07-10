@@ -1,0 +1,197 @@
+name: "Fuzz native imagemagick"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: imagemagick
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get install -y -qq \
+            libpng-dev \
+            libjpeg-dev \
+            zlib1g-dev \
+            libbz2-dev \
+            2>/dev/null || true
+
+      - name: Clone latest ImageMagick source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/ImageMagick/ImageMagick.git /tmp/src/ImageMagick
+
+      - name: Build magick with AFL++ and ASan
+        run: |
+          set -e
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export LDFLAGS="-fsanitize=address"
+          cd /tmp/src/ImageMagick
+          # ./configure is committed to the tree; regenerate if missing.
+          if [ ! -x ./configure ]; then
+            autoreconf -fi
+          fi
+          ./configure \
+            --with-quantum-depth=16 \
+            --disable-shared \
+            --disable-docs \
+            --without-magick-plus-plus
+          make -j"$(nproc)"
+          BINDIR="$(pwd)/utilities"
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "MAGICK=$BINDIR/magick" >> "$GITHUB_ENV"
+          echo "[+] Built binaries:"
+          ls -la "$BINDIR" || true
+          if [ ! -x "$BINDIR/magick" ]; then
+            echo "[!] magick was not built — aborting"
+            exit 1
+          fi
+          # Confirm it is a real ELF, not a libtool wrapper script.
+          file "$BINDIR/magick" || true
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set +e
+          mkdir -p results/dry_run
+          BIN="$MAGICK"
+          bname="magick"
+          crash_count=0
+          total=0
+          for seed in seeds/"$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname="$(basename "$seed" .bin)"
+            total=$((total + 1))
+            # Select the recorded invocation per CVE seed.
+            case "$sname" in
+              *CVE-2017-11522*)
+                # SFW input written out as MNG hits WriteOnePNGImage.
+                ARGS=(convert "$seed" /tmp/out.mng) ;;
+              *CVE-2016-10051*)
+                # SFW/PWP input (ReadPWPImage).
+                ARGS=(identify "$seed") ;;
+              *)
+                ARGS=(identify "$seed") ;;
+            esac
+            echo "[*] Replaying $sname ..."
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              timeout 60 "$BIN" "${ARGS[@]}" > /dev/null 2> results/dry_run/.stderr_tmp
+            exit_code=$?
+            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+              echo "  [!] CRASH: $sname (exit=$exit_code)"
+              mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          set +e
+          mkdir -p results
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_USE_ASAN=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+          # Two recorded invocations exercise different decoders/encoders; split
+          # the budget across two campaigns seeded from the same corpus.
+          HALF=$(( FUZZ_DURATION / 2 ))
+          [ "$HALF" -lt 60 ] && HALF=60
+          echo "[*] Campaign 1: convert @@ /tmp/out.mng (${HALF}s)"
+          afl-fuzz \
+            -i "seeds/$PROJECT" \
+            -o results/afl_convert \
+            -V "$HALF" \
+            -- "$MAGICK" convert @@ /tmp/out.mng || true
+          echo "[*] Campaign 2: identify @@ (${HALF}s)"
+          afl-fuzz \
+            -i "seeds/$PROJECT" \
+            -o results/afl_identify \
+            -V "$HALF" \
+            -- "$MAGICK" identify @@ || true
+          echo "[+] Fuzzing step finished"
+
+      - name: Triage crashes
+        run: |
+          set +e
+          mkdir -p results/fuzz
+          BIN="$MAGICK"
+          bname="magick"
+          n=0
+          triage_dir () {
+            local crash_dir="$1"; shift
+            local mode="$1"; shift
+            [ -d "$crash_dir" ] || return 0
+            for crash in "$crash_dir"/*; do
+              [ -f "$crash" ] || continue
+              cname="$(basename "$crash")"
+              [ "$cname" = "README.txt" ] && continue
+              n=$((n + 1))
+              echo "[*] Triaging ${mode} ${cname} ..."
+              if [ "$mode" = "convert" ]; then
+                ARGS=(convert "$crash" /tmp/out.mng)
+              else
+                ARGS=(identify "$crash")
+              fi
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 \
+                timeout 60 "$BIN" "${ARGS[@]}" > /dev/null \
+                2> "results/fuzz/${bname}_${mode}_${cname}.txt"
+              cp "$crash" "results/fuzz/${bname}_${mode}_${cname}.bin"
+            done
+          }
+          triage_dir results/afl_convert/default/crashes convert
+          triage_dir results/afl_identify/default/crashes identify
+          echo "[+] Triaged $n crashing inputs"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-imagemagick
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-imagemagick
+          path: results/
+          retention-days: 30

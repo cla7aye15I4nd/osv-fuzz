@@ -1,0 +1,201 @@
+name: "Fuzz native ffmpeg"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: ffmpeg
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone and build latest ffmpeg with AFL++ + ASan
+        run: |
+          set -euo pipefail
+          # FFmpeg's asm paths need nasm/yasm; installing keeps configure happy.
+          sudo apt-get install -y -qq nasm yasm 2>/dev/null || true
+
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/FFmpeg/FFmpeg.git /tmp/src/ffmpeg
+          cd /tmp/src/ffmpeg
+          export SRC="$(pwd)"
+
+          # AFL++ instrumentation + AddressSanitizer.
+          export AFL_USE_ASAN=1
+
+          # --- ffmpeg CLI with AFL++ + ASan (covers the -i <file> -f null - PoCs) ---
+          ./configure \
+            --cc=afl-cc --cxx=afl-c++ \
+            --enable-gpl --enable-nonfree \
+            --disable-stripping \
+            --extra-cflags="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            --extra-cxxflags="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            --extra-ldflags="-fsanitize=address"
+          make -j"$(nproc)" ffmpeg
+
+          CLI_BIN="$SRC/ffmpeg"
+          if [ ! -x "$CLI_BIN" ]; then
+            echo "[!] Expected ffmpeg CLI not found at $CLI_BIN"
+            find "$SRC" -maxdepth 1 -name 'ffmpeg*' -type f 2>/dev/null || true
+            exit 1
+          fi
+          echo "[+] Built CLI target: $CLI_BIN"
+          echo "TARGET_BIN=$CLI_BIN" >> "$GITHUB_ENV"
+          echo "SRC_DIR=$SRC" >> "$GITHUB_ENV"
+
+          # --- OSS-Fuzz decoder harness for the *_fuzzer PoC (AV_CODEC_ID_IDF) ---
+          # Best-effort: a harness build failure must not sink the CLI-based run.
+          set +e
+          (
+            set -e
+            cd "$SRC"
+            make distclean
+            ./configure \
+              --cc=afl-cc --cxx=afl-c++ \
+              --enable-gpl --enable-nonfree --disable-stripping \
+              --enable-ossfuzz \
+              --extra-cflags="-g -O1 -fsanitize=address,fuzzer-no-link -fno-omit-frame-pointer" \
+              --extra-cxxflags="-g -O1 -fsanitize=address,fuzzer-no-link -fno-omit-frame-pointer" \
+              --extra-ldflags="-fsanitize=address"
+            make -j"$(nproc)" tools/target_dec_fuzzer
+            afl-cc -g -O1 -fsanitize=address,fuzzer -fno-omit-frame-pointer \
+              -DFFMPEG_DECODER=IDF -I"$SRC" \
+              tools/target_dec_fuzzer.c -o "$SRC/ffmpeg_AV_CODEC_ID_IDF_fuzzer" \
+              "$SRC"/libavcodec/libavcodec.a "$SRC"/libavformat/libavformat.a \
+              "$SRC"/libavutil/libavutil.a "$SRC"/libswresample/libswresample.a \
+              "$SRC"/libavformat/libavformat.a -lm -lz
+          )
+          set -e
+          HARNESS_BIN="$SRC/ffmpeg_AV_CODEC_ID_IDF_fuzzer"
+          if [ -x "$HARNESS_BIN" ]; then
+            echo "[+] Built harness target: $HARNESS_BIN"
+            echo "HARNESS_BIN=$HARNESS_BIN" >> "$GITHUB_ENV"
+          else
+            echo "[!] IDF fuzzer harness not built — continuing with CLI only"
+          fi
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -uo pipefail
+          mkdir -p results/dry_run
+          crash_count=0
+          total=0
+
+          replay() {
+            # $1 = label used in result filenames, remaining args = full command
+            local label="$1"; shift
+            local sname="$1"; shift
+            local seed="$1"; shift
+            local result_file="results/dry_run/${label}_${sname}.txt"
+            total=$((total + 1))
+            echo "[*] Replaying $label with $sname..."
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+            timeout 60 "$@" > /dev/null 2> results/dry_run/.stderr_tmp
+            local exit_code=$?
+            set -e
+            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+              echo "  [!] CRASH: $label with $sname (exit=$exit_code)"
+              mv results/dry_run/.stderr_tmp "$result_file"
+              cp "$seed" "results/dry_run/${label}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          }
+
+          CLI_BIN="$TARGET_BIN"
+          cli_name="$(basename "$CLI_BIN")"
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname="$(basename "$seed" .bin)"
+            # CLI invocation:  $BIN -i $POC -f null -
+            replay "$cli_name" "$sname" "$seed" "$CLI_BIN" -i "$seed" -f null -
+            # OSS-Fuzz harness invocation:  $HARNESS $POC
+            if [ -n "${HARNESS_BIN:-}" ] && [ -x "${HARNESS_BIN:-}" ]; then
+              hname="$(basename "$HARNESS_BIN")"
+              replay "$hname" "$sname" "$seed" "$HARNESS_BIN" "$seed"
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -uo pipefail
+          CLI_BIN="$TARGET_BIN"
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          # Drive the ffmpeg CLI; AFL substitutes @@ for the input file path.
+          afl-fuzz -i "seeds/$PROJECT" -o results/afl -V "$FUZZ_DURATION" \
+            -- "$CLI_BIN" -i @@ -f null - || true
+
+      - name: Triage AFL++ crashes
+        run: |
+          set -uo pipefail
+          CLI_BIN="$TARGET_BIN"
+          bname="$(basename "$CLI_BIN")"
+          mkdir -p results/fuzz
+          crash_count=0
+          for crash in results/afl/default/crashes/*; do
+            [ -f "$crash" ] || continue
+            cname="$(basename "$crash")"
+            [ "$cname" = "README.txt" ] && continue
+            result_file="results/fuzz/${bname}_${cname}.txt"
+            echo "[*] Triaging $cname..."
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+            timeout 60 "$CLI_BIN" -i "$crash" -f null - > /dev/null 2> "$result_file"
+            exit_code=$?
+            set -e
+            cp "$crash" "results/fuzz/${bname}_${cname}.bin"
+            crash_count=$((crash_count + 1))
+            echo "  [i] $cname triaged (exit=$exit_code)"
+          done
+          echo "[+] Triaged $crash_count crash inputs"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-ffmpeg
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-ffmpeg
+          path: results/
+          retention-days: 30

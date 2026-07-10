@@ -1,0 +1,137 @@
+name: "Fuzz native libxsmm"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: libxsmm
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone and build latest libxsmm with AFL++ + ASan
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/libxsmm/libxsmm.git /tmp/src/libxsmm
+          cd /tmp/src/libxsmm
+          export AFL_USE_ASAN=1
+          CC=afl-cc CXX=afl-c++ \
+          make generator -j"$(nproc)" \
+            SANITIZE=address DBG=1 FORTRAN=0 BLAS=0 \
+            ECFLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address" \
+            ECXXFLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address"
+          BIN="$PWD/bin/libxsmm_gemm_generator"
+          if [ ! -x "$BIN" ]; then
+            echo "[!] Build failed — $BIN not found"
+            exit 1
+          fi
+          echo "BINDIR=$PWD/bin" >> "$GITHUB_ENV"
+          echo "TARGET_BIN=$BIN" >> "$GITHUB_ENV"
+          echo "[+] Built ASan target: $BIN"
+          ls -la "$PWD/bin"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -uxo pipefail
+          mkdir -p results/dry_run
+          bname=$(basename "$TARGET_BIN")
+          shopt -s nullglob
+          for seed in "seeds/$PROJECT"/*.bin; do
+            sname=$(basename "$seed" .bin)
+            result_file="results/dry_run/${bname}_${sname}.txt"
+            echo "[*] Replaying $sname through $bname..."
+            set +e
+            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+            timeout 60 "$TARGET_BIN" sparse b a 10 10 10 1 1 1 1 1 1 0 wsm nopf SP "$seed" \
+              > /dev/null 2> "results/dry_run/.stderr_tmp"
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+              echo "  [!] CRASH: $sname (exit=$exit_code)"
+              mv "results/dry_run/.stderr_tmp" "$result_file"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+            else
+              rm -f "results/dry_run/.stderr_tmp"
+            fi
+          done
+          echo "[+] Dry run complete"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -uxo pipefail
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_USE_ASAN=1
+          afl-fuzz -i "seeds/$PROJECT" -o results/afl -V "$FUZZ_DURATION" -m none -- \
+            "$TARGET_BIN" sparse b a 10 10 10 1 1 1 1 1 1 0 wsm nopf SP @@ || true
+          echo "[+] Fuzzing step finished"
+
+      - name: Triage AFL++ crashes
+        run: |
+          set -uxo pipefail
+          mkdir -p results/fuzz
+          bname=$(basename "$TARGET_BIN")
+          shopt -s nullglob
+          crash_dir="results/afl/default/crashes"
+          for crash in "$crash_dir"/*; do
+            cname=$(basename "$crash")
+            [ "$cname" = "README.txt" ] && continue
+            [ -f "$crash" ] || continue
+            result_file="results/fuzz/${bname}_${cname}.txt"
+            echo "[*] Triaging $cname..."
+            set +e
+            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+            timeout 60 "$TARGET_BIN" sparse b a 10 10 10 1 1 1 1 1 1 0 wsm nopf SP "$crash" \
+              > /dev/null 2> "$result_file"
+            set -e
+            cp "$crash" "results/fuzz/${bname}_${cname}.bin"
+          done
+          echo "[+] Triage complete"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-libxsmm
+          path: results/
+          retention-days: 30
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-libxsmm
+          path: results/pocs/
+          retention-days: 90

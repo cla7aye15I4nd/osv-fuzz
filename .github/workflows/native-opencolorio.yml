@@ -1,0 +1,150 @@
+name: "Fuzz native opencolorio"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 15 * * 0"
+
+env:
+  PROJECT: opencolorio
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone and build latest opencolorio with AFL++ + ASan
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/cozdas/opencolorio.git /tmp/src/opencolorio
+          cd /tmp/src/opencolorio
+
+          export AFL_USE_ASAN=1
+          export CC=afl-cc
+          export CXX=afl-c++
+
+          cmake -S . -B build -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=afl-cc -DCMAKE_CXX_COMPILER=afl-c++ \
+            -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address" \
+            -DOCIO_BUILD_APPS=ON \
+            -DOCIO_BUILD_TESTS=OFF -DOCIO_BUILD_GPU_TESTS=OFF \
+            -DOCIO_BUILD_PYTHON=OFF -DOCIO_BUILD_DOCS=OFF \
+            -DOCIO_INSTALL_EXT_PACKAGES=MISSING
+          cmake --build build --target ociocheck -j"$(nproc)"
+
+          BIN=$(find "$PWD/build" -type f -name ociocheck -perm -u+x | head -1)
+          if [ -z "$BIN" ]; then
+            echo "[!] ociocheck binary not found after build"
+            find "$PWD/build" -name 'ociocheck*' || true
+            exit 1
+          fi
+          echo "[+] Built ociocheck: $BIN"
+          echo "OCIO_BIN=$BIN" >> "$GITHUB_ENV"
+          echo "BINDIR=$(dirname "$BIN")" >> "$GITHUB_ENV"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -uo pipefail
+          mkdir -p results/dry_run
+          bname=$(basename "$OCIO_BIN")
+          crash_count=0
+          total=0
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            total=$((total + 1))
+            echo "[*] Replaying $bname with $sname..."
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              timeout 60 "$OCIO_BIN" --iconfig "$seed" > /dev/null 2> results/dry_run/.stderr_tmp
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+              echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
+              mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -uo pipefail
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+          afl-fuzz -i "seeds/$PROJECT" -o results/afl -V "$FUZZ_DURATION" \
+            -- "$OCIO_BIN" --iconfig @@ || true
+
+      - name: Triage AFL crashes
+        run: |
+          set -uo pipefail
+          mkdir -p results/fuzz
+          bname=$(basename "$OCIO_BIN")
+          crash_dir=results/afl/default/crashes
+          if [ -d "$crash_dir" ]; then
+            for crash in "$crash_dir"/*; do
+              [ -f "$crash" ] || continue
+              cname=$(basename "$crash")
+              [ "$cname" = "README.txt" ] && continue
+              echo "[*] Triaging $cname..."
+              set +e
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 \
+                timeout 60 "$OCIO_BIN" --iconfig "$crash" > /dev/null 2> "results/fuzz/${bname}_${cname}.txt"
+              set -e
+              cp "$crash" "results/fuzz/${bname}_${cname}.bin"
+            done
+          else
+            echo "[+] No crashes directory found at $crash_dir"
+          fi
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-opencolorio
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-opencolorio
+          path: results/
+          retention-days: 30

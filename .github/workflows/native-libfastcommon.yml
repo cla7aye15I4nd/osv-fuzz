@@ -1,0 +1,193 @@
+name: "Fuzz native libfastcommon"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: libfastcommon
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Install libfastcommon build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang git make 2>/dev/null
+
+      - name: Clone latest libfastcommon source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/happyfish100/libfastcommon.git /tmp/src/libfastcommon
+
+      - name: Build libfastcommon harness with AFL++ + ASan
+        run: |
+          set -e
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          cd /tmp/src/libfastcommon
+
+          # libfastcommon is a LIBRARY (no CLI programs); the vulnerable function
+          # base64_decode_auto (src/base64.c) is only reachable via an API-level
+          # harness. Build the harness from upstream issue #55: it reads a crash
+          # file from argv[1] and feeds it to base64_decode_auto.
+          cat > fuzz_base64_decode.c <<'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <stdint.h>
+          #include "base64.h"
+
+          static struct base64_context g_base64_ctx;
+
+          __attribute__((constructor))
+          void init_base64_context() {
+              base64_init(&g_base64_ctx, 0);
+          }
+
+          void test_input(const uint8_t *Data, size_t Size) {
+              if (Size == 0 || Size > 1024 * 1024) return;
+              char *input = (char *)malloc(Size + 1);
+              if (!input) return;
+              memcpy(input, Data, Size);
+              input[Size] = '\0';
+              char *output = (char *)malloc(Size + 64);
+              if (!output) { free(input); return; }
+              int decoded_len = 0;
+              base64_decode_auto(&g_base64_ctx, input, Size, output, &decoded_len);
+              free(output);
+              free(input);
+          }
+
+          int main(int argc, char **argv) {
+              if (argc < 2) { printf("Usage: %s <crash_file>\n", argv[0]); return 1; }
+              FILE *f = fopen(argv[1], "rb");
+              if (!f) return 1;
+              fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
+              unsigned char *buf = malloc(len);
+              if (buf) { fread(buf, 1, len, f); test_input(buf, len); free(buf); }
+              fclose(f);
+              return 0;
+          }
+          EOF
+
+          # Compile the vulnerable TU with ASan, then link the harness against it.
+          $CC $CFLAGS -I src -c src/base64.c -o base64.o
+          $CC $CFLAGS -I src fuzz_base64_decode.c base64.o -o poc_runner
+
+          BIN="/tmp/src/libfastcommon/poc_runner"
+          if [ ! -x "$BIN" ]; then
+            echo "[!] Expected harness not found at $BIN"
+            find /tmp/src/libfastcommon -maxdepth 2 -type f -executable | head
+            exit 1
+          fi
+          echo "BINDIR=/tmp/src/libfastcommon" >> "$GITHUB_ENV"
+          echo "FUZZ_BIN=$BIN" >> "$GITHUB_ENV"
+          echo "[+] Built harness: $BIN"
+          ls -la "$BIN"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set +e
+          mkdir -p results/dry_run
+          bname=$(basename "$FUZZ_BIN")
+          crash_count=0
+          total=0
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            total=$((total + 1))
+            echo "[*] Replaying $sname through $bname..."
+            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+              timeout 60 "$FUZZ_BIN" "$seed" > /dev/null 2> results/dry_run/.stderr_tmp
+            exit_code=$?
+            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+              echo "  [!] CRASH: $sname (exit=$exit_code)"
+              mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          set +e
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          afl-fuzz -i "seeds/$PROJECT" -o results/afl -V "$FUZZ_DURATION" \
+            -- "$FUZZ_BIN" @@
+          echo "[+] Fuzzing finished (exit=$?)"
+          exit 0
+        continue-on-error: true
+
+      - name: Triage AFL++ crashes
+        run: |
+          set +e
+          mkdir -p results/fuzz
+          bname=$(basename "$FUZZ_BIN")
+          crash_dir="results/afl/default/crashes"
+          if [ ! -d "$crash_dir" ]; then
+            echo "[+] No crash directory found: $crash_dir"
+            exit 0
+          fi
+          for crash in "$crash_dir"/*; do
+            [ -f "$crash" ] || continue
+            cname=$(basename "$crash")
+            [ "$cname" = "README.txt" ] && continue
+            echo "[*] Triaging $cname..."
+            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+              timeout 60 "$FUZZ_BIN" "$crash" > /dev/null 2> "results/fuzz/${bname}_${cname}.txt"
+            cp "$crash" "results/fuzz/${bname}_${cname}.bin"
+          done
+          echo "[+] Triage complete"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-libfastcommon
+          path: results/
+          retention-days: 30
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-libfastcommon
+          path: results/pocs/
+          retention-days: 90

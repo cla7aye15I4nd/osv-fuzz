@@ -1,0 +1,171 @@
+name: "Fuzz native libjxl"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: libjxl
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone and build latest libjxl with AFL++ + ASan
+        run: |
+          set -e
+          mkdir -p /tmp/src
+          git clone --recursive --shallow-submodules \
+            https://github.com/libjxl/libjxl.git /tmp/src/libjxl
+          cd /tmp/src/libjxl
+          # Ensure vendored deps (highway/brotli/skcms) are present.
+          if [ -f ./deps.sh ]; then ./deps.sh || true; fi
+
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export LDFLAGS="-fsanitize=address"
+
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+                -DBUILD_TESTING=OFF \
+                -DJPEGXL_ENABLE_BENCHMARK=OFF \
+                -DJPEGXL_ENABLE_EXAMPLES=OFF \
+                -DCMAKE_C_COMPILER=afl-cc -DCMAKE_CXX_COMPILER=afl-c++ \
+                -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+                -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS" \
+                ..
+          cmake --build . -- -j"$(nproc)" djxl
+
+          BIN="/tmp/src/libjxl/build/tools/djxl"
+          if [ ! -x "$BIN" ]; then
+            echo "[!] djxl binary not found at $BIN"
+            find /tmp/src/libjxl/build -name djxl -type f 2>/dev/null || true
+            exit 1
+          fi
+          echo "[+] Built target: $BIN"
+          "$BIN" --version 2>&1 | head -1 || true
+          echo "BINDIR=/tmp/src/libjxl/build/tools" >> "$GITHUB_ENV"
+          echo "TARGET_BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -u
+          BIN="$TARGET_BIN"
+          bname="$(basename "$BIN")"
+          mkdir -p results/dry_run
+          crash_count=0
+          total=0
+          shopt -s nullglob
+          for seed in seeds/"$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname="$(basename "$seed" .bin)"
+            result_file="results/dry_run/${bname}_${sname}.txt"
+            total=$((total + 1))
+            echo "[*] Replaying $bname with $sname..."
+            set +e
+            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+              timeout 60 "$BIN" "$seed" /dev/null > /dev/null 2> "results/dry_run/.stderr_tmp"
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+              echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
+              mv "results/dry_run/.stderr_tmp" "$result_file"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f "results/dry_run/.stderr_tmp"
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -u
+          BIN="$TARGET_BIN"
+          mkdir -p results/afl
+          # djxl takes an input file path as its first arg -> replace with @@.
+          set +e
+          AFL_SKIP_CPUFREQ=1 \
+          AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+          AFL_NO_UI=1 \
+          ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+            afl-fuzz -i "seeds/$PROJECT" -o results/afl -m none \
+              -V "$FUZZ_DURATION" \
+              -- "$BIN" @@ /dev/null
+          set -e
+          echo "[+] Fuzzing step finished."
+          true
+        continue-on-error: true
+
+      - name: Triage crashes
+        run: |
+          set -u
+          BIN="$TARGET_BIN"
+          bname="$(basename "$BIN")"
+          mkdir -p results/fuzz
+          new_crashes=0
+          shopt -s nullglob
+          crash_dir="results/afl/default/crashes"
+          if [ -d "$crash_dir" ]; then
+            for crash_file in "$crash_dir"/*; do
+              [ -f "$crash_file" ] || continue
+              cbase="$(basename "$crash_file")"
+              [ "$cbase" = "README.txt" ] && continue
+              crash_name="$(echo "$cbase" | tr ':,' '__')"
+              result_file="results/fuzz/${bname}_${crash_name}.txt"
+              set +e
+              ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+                timeout 60 "$BIN" "$crash_file" /dev/null > /dev/null 2> "$result_file"
+              replay_exit=$?
+              set -e
+              if [ "$replay_exit" -ne 0 ] && [ "$replay_exit" -ne 124 ]; then
+                echo "  [!] NEW CRASH: $bname $crash_name (exit=$replay_exit)"
+                cp "$crash_file" "results/fuzz/${bname}_${crash_name}.bin"
+                new_crashes=$((new_crashes + 1))
+              else
+                rm -f "$result_file"
+              fi
+            done
+          fi
+          echo "[+] Triage complete: $new_crashes reproduced crashes"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-libjxl
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-libjxl
+          path: results/
+          retention-days: 30

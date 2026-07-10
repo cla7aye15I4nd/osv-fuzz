@@ -1,0 +1,149 @@
+name: "Fuzz native libsndfile"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: libsndfile
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone and build latest libsndfile with AFL++ + ASan
+        run: |
+          set -e
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/libsndfile/libsndfile.git /tmp/src/libsndfile
+          cd /tmp/src/libsndfile
+          autoreconf -vif
+          export AFL_USE_ASAN=1
+          CC=afl-cc CXX=afl-c++ \
+          CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+          CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+          LDFLAGS="-fsanitize=address" \
+          ./configure --disable-shared
+          make -j"$(nproc)"
+          # CLI programs are statically linked against ASan due to --disable-shared
+          BINDIR="$PWD/programs"
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "TARGET_BIN=$BINDIR/sndfile-convert" >> "$GITHUB_ENV"
+          echo "[+] Built target binary:"
+          ls -la "$BINDIR/sndfile-convert"
+
+      - name: Dry run replay (lost-bug check)
+        run: |
+          set -u
+          mkdir -p results/dry_run
+          BIN="$TARGET_BIN"
+          bname=$(basename "$BIN")
+          crash_count=0
+          total=0
+          shopt -s nullglob
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            total=$((total + 1))
+            echo "[*] Replaying $bname with $sname..."
+            POC="$seed"
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+            timeout 60 "$BIN" "$POC" /tmp/dryrun_out.ogg > /dev/null 2> results/dry_run/.stderr_tmp
+            exit_code=$?
+            set -e
+            if [ $exit_code -ne 0 ] && [ $exit_code -ne 124 ]; then
+              echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
+              mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -u
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+          afl-fuzz \
+            -i "seeds/$PROJECT" \
+            -o results/afl \
+            -V "$FUZZ_DURATION" \
+            -- "$TARGET_BIN" @@ /tmp/afl_out.ogg || true
+
+      - name: Triage crashes
+        run: |
+          set -u
+          mkdir -p results/fuzz
+          BIN="$TARGET_BIN"
+          bname=$(basename "$BIN")
+          shopt -s nullglob
+          crashes_dir="results/afl/default/crashes"
+          if [ ! -d "$crashes_dir" ]; then
+            echo "[+] No crashes directory found — nothing to triage"
+            exit 0
+          fi
+          n=0
+          for crash in "$crashes_dir"/*; do
+            [ -f "$crash" ] || continue
+            cbase=$(basename "$crash")
+            [ "$cbase" = "README.txt" ] && continue
+            n=$((n + 1))
+            echo "[*] Triaging $cbase..."
+            POC="$crash"
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 \
+            timeout 60 "$BIN" "$POC" /tmp/triage_out.ogg > /dev/null 2> "results/fuzz/${bname}_${cbase}.txt"
+            set -e
+            cp "$crash" "results/fuzz/${bname}_${cbase}.bin"
+          done
+          echo "[+] Triaged $n crash inputs"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-libsndfile
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-libsndfile
+          path: results/
+          retention-days: 30

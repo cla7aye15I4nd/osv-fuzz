@@ -1,0 +1,249 @@
+name: "Fuzz native iccdev"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 16 * * 0"
+
+env:
+  PROJECT: iccdev
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -40 || true
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+          sudo apt-get install -y -qq \
+            libpng-dev libjpeg-dev libtiff-dev libxml2-dev \
+            nlohmann-json3-dev ninja-build 2>/dev/null || true
+
+      - name: Clone and build latest iccdev with AFL++ + ASan
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/InternationalColorConsortium/iccDEV.git /tmp/src/iccdev
+          cd /tmp/src/iccdev
+
+          export AFL_USE_ASAN=1
+          export CC=afl-cc
+          export CXX=afl-c++
+
+          cmake -G Ninja -S Build/Cmake -B out/asan \
+            -DCMAKE_C_COMPILER=afl-cc -DCMAKE_CXX_COMPILER=afl-c++ \
+            -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON \
+            -DENABLE_TOOLS=ON -DENABLE_ICCXML=ON \
+            -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          cmake --build out/asan -j"$(nproc)"
+
+          BINDIR="$PWD/out/asan"
+          # Verify the primary fuzz target (and the tools used by dry-run) exist.
+          XML="$BINDIR/Tools/IccFromXml/iccFromXml"
+          if [ ! -x "$XML" ]; then
+            echo "[!] iccFromXml not found under $BINDIR/Tools — build layout unexpected"
+            find "$BINDIR" -type f -executable -name 'icc*' | head -40 || true
+            exit 1
+          fi
+          echo "[+] Built tools under: $BINDIR"
+          find "$BINDIR/Tools" -type f -executable -name 'icc*' | sort
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+
+      - name: Fetch companion assets (xsscx/fuzz + sample TIFF)
+        run: |
+          set -uo pipefail
+          # Several PoC invocations pass a second, fixed .icc "companion" profile
+          # (published at github.com/xsscx/fuzz) alongside the mutated $POC.
+          git clone --depth 1 https://github.com/xsscx/fuzz /tmp/xsscx-fuzz 2>/dev/null || \
+            echo "[!] Could not clone xsscx/fuzz — companion-dependent replays may be skipped"
+          # A minimal valid RGB TIFF for the CVE-2026-31793 invocation.
+          python3 - <<'PY' 2>/dev/null || echo "[!] Pillow unavailable — /tmp/foo.tif not generated"
+          try:
+              from PIL import Image
+              Image.new("RGB", (4, 4), (128, 128, 128)).save("/tmp/foo.tif")
+              print("[+] wrote /tmp/foo.tif")
+          except Exception as e:
+              raise SystemExit(1)
+          PY
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -uo pipefail
+          mkdir -p results/dry_run
+
+          XML="$BINDIR/Tools/IccFromXml/iccFromXml"
+          RT="$BINDIR/Tools/IccRoundTrip/iccRoundTrip"
+          DUMP="$BINDIR/Tools/IccDumpProfile/iccDumpProfile"
+          AP="$BINDIR/Tools/IccApplyProfiles/iccApplyProfiles"
+          ANC="$BINDIR/Tools/IccApplyNamedCmm/iccApplyNamedCmm"
+          CUBE="$BINDIR/Tools/IccFromCube/iccFromCube"
+          TIFFD="$BINDIR/Tools/IccTiffDump/iccTiffDump"
+          TOXML="$BINDIR/Tools/IccToXml/iccToXml"
+
+          # Resolve companion profiles (any path match under the cloned repo).
+          find_comp() { find /tmp/xsscx-fuzz -name "$1" 2>/dev/null | head -1; }
+          COMP_SO=$(find_comp 'so-CIccCalculatorFunc-CheckUnderflowOverflow-IccMpeCalc_cpp-Line4152.icc')
+          COMP_SBO=$(find_comp 'sbo-CIccXform3DLut-Apply-IccCmm_cpp-Line5873.icc')
+          COMP_SEGV=$(find_comp 'segv-CIccCLUT-Interp3d-IccTagLut_cpp-Line2741.icc')
+          COMP_HUAF=$(find_comp 'huaf-CIccCmm-AddXform-IccCmm_cpp-Line8320.icc')
+
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+
+          # Runs a command; on a real crash (exit != 0 and != 124/timeout) saves
+          # stderr + the seed under results/dry_run/<binary>_<seedname>.{txt,bin}.
+          replay() {
+            local bname="$1"; local seed="$2"; local sname="$3"; shift 3
+            local out="results/dry_run/${bname}_${sname}"
+            set +e
+            timeout 60 "$@" > /dev/null 2> "${out}.txt.tmp"
+            local ec=$?
+            set -e
+            if [ "$ec" -ne 0 ] && [ "$ec" -ne 124 ]; then
+              echo "  [!] CRASH: $bname with $sname (exit=$ec)"
+              mv "${out}.txt.tmp" "${out}.txt"
+              cp "$seed" "${out}.bin"
+            else
+              rm -f "${out}.txt.tmp"
+            fi
+          }
+
+          crash_before=$(find results/dry_run -name '*.txt' 2>/dev/null | wc -l)
+          total=0
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            total=$((total + 1))
+            echo "[*] Replaying $sname..."
+            # Map each PoC (by CVE id embedded in the seed name) to its recorded
+            # tool + argument invocation, substituting the seed for \$POC.
+            case "$sname" in
+              *21688*|*21498*|*31792*|*21500*|*31796*|*24409*|*22255*|*21506*|*21492*|*22046*|*24410*)
+                replay iccFromXml "$seed" "$sname" "$XML" "$seed" /tmp/out.icc ;;
+              *25582*)
+                replay iccFromXml "$seed" "$sname" "$XML" "$seed" /tmp/out.bar ;;
+              *34552*)
+                replay iccRoundTrip "$seed" "$sname" "$RT" "$seed" ;;
+              *21679*|*21680*)
+                replay iccDumpProfile "$seed" "$sname" "$DUMP" "$seed" ;;
+              *21494*)
+                replay iccDumpProfile "$seed" "$sname" "$DUMP" -v "$seed" ;;
+              *34551*)
+                replay iccTiffDump "$seed" "$sname" "$TIFFD" "$seed" /tmp/out.icc ;;
+              *22047*)
+                replay iccToXml "$seed" "$sname" "$TOXML" "$seed" /tmp/out.xml ;;
+              *27691*)
+                replay iccFromCube "$seed" "$sname" "$CUBE" "$seed" /tmp/out.icc ;;
+              *34536*)
+                [ -n "$COMP_SO" ] && replay iccApplyProfiles "$seed" "$sname" "$AP" "$seed" /dev/null 0 0 0 0 0 "$COMP_SO" 0 || echo "  [~] skip $sname (missing companion)" ;;
+              *31795*)
+                [ -n "$COMP_SBO" ] && replay iccApplyProfiles "$seed" "$sname" "$AP" "$seed" /tmp/out.tif 0 0 0 0 1 "$COMP_SBO" 40 || echo "  [~] skip $sname (missing companion)" ;;
+              *31794*)
+                [ -n "$COMP_SEGV" ] && replay iccApplyProfiles "$seed" "$sname" "$AP" "$seed" /tmp/out.tif 0 0 0 0 0 "$COMP_SEGV" 0 || echo "  [~] skip $sname (missing companion)" ;;
+              *30978*)
+                [ -n "$COMP_HUAF" ] && replay iccApplyProfiles "$seed" "$sname" "$AP" "$seed" /tmp/out.tif 2 1 0 0 0 "$COMP_HUAF" 0 || echo "  [~] skip $sname (missing companion)" ;;
+              *31793*)
+                [ -f /tmp/foo.tif ] && replay iccApplyProfiles "$seed" "$sname" "$AP" /tmp/foo.tif /tmp/out.tif 0 0 0 0 0 "$seed" 1 || echo "  [~] skip $sname (missing foo.tif)" ;;
+              *30986*)
+                # This tool reads the source profile from stdin; \$POC is the 4th arg.
+                out="results/dry_run/iccApplyNamedCmm_${sname}"
+                set +e
+                printf "'RGB '\nicEncodeFloat\n0.5 0.5 0.5\n" | \
+                  timeout 60 "$ANC" /dev/stdin 3 0 "$seed" 0 > /dev/null 2> "${out}.txt.tmp"
+                ec=$?
+                set -e
+                if [ "$ec" -ne 0 ] && [ "$ec" -ne 124 ]; then
+                  echo "  [!] CRASH: iccApplyNamedCmm with $sname (exit=$ec)"
+                  mv "${out}.txt.tmp" "${out}.txt"; cp "$seed" "${out}.bin"
+                else
+                  rm -f "${out}.txt.tmp"
+                fi ;;
+              *)
+                # Unknown seed — default to the dominant XML tool.
+                replay iccFromXml "$seed" "$sname" "$XML" "$seed" /tmp/out.icc ;;
+            esac
+          done
+          crash_after=$(find results/dry_run -name '*.txt' 2>/dev/null | wc -l)
+          echo "[+] Dry run complete: $((crash_after - crash_before)) crashes out of $total replays"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -uo pipefail
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+          # Primary target: iccFromXml (the tool exercised by the majority of the
+          # lost-bug PoCs). @@ is the mutated input path; extra arg is the output.
+          XML="$BINDIR/Tools/IccFromXml/iccFromXml"
+          afl-fuzz -i "seeds/$PROJECT" -o results/afl -V "$FUZZ_DURATION" -m none \
+            -- "$XML" @@ /tmp/out.icc || true
+
+      - name: Triage AFL crashes
+        run: |
+          set -uo pipefail
+          mkdir -p results/fuzz
+          XML="$BINDIR/Tools/IccFromXml/iccFromXml"
+          bname=iccFromXml
+          crash_dir=results/afl/default/crashes
+          if [ -d "$crash_dir" ]; then
+            for crash in "$crash_dir"/*; do
+              [ -f "$crash" ] || continue
+              cname=$(basename "$crash")
+              [ "$cname" = "README.txt" ] && continue
+              cid=$(echo "$cname" | tr ':,' '__')
+              echo "[*] Triaging $cname..."
+              set +e
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 \
+                timeout 60 "$XML" "$crash" /tmp/out.icc > /dev/null 2> "results/fuzz/${bname}_${cid}.txt"
+              ec=$?
+              set -e
+              if [ "$ec" -ne 0 ] && [ "$ec" -ne 124 ]; then
+                cp "$crash" "results/fuzz/${bname}_${cid}.bin"
+              else
+                rm -f "results/fuzz/${bname}_${cid}.txt"
+              fi
+            done
+          else
+            echo "[+] No crashes directory found at $crash_dir"
+          fi
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-iccdev
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-iccdev
+          path: results/
+          retention-days: 30

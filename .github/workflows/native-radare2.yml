@@ -1,0 +1,213 @@
+name: "Fuzz native radare2"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: radare2
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: |
+          bash scripts/setup_aflpp.sh
+
+      - name: Clone latest radare2 source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/radareorg/radare2 /tmp/src/radare2
+
+      - name: Build radare2 with AFL++ and ASan
+        run: |
+          set -e
+          # AFL++ instrumentation + AddressSanitizer via the recorded configure+make
+          # recipe, installed into a self-contained local prefix so the CLI tools and
+          # the libr shared objects live together.
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export LDFLAGS="-fsanitize=address"
+          cd /tmp/src/radare2
+          ./configure --prefix="$PWD/install"
+          make -j"$(nproc)"
+          make install
+          BINDIR="$PWD/install/bin"
+          # Export for later steps (target binaries + their shared libraries).
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$PWD/install/lib" >> "$GITHUB_ENV"
+          echo "[+] Built binaries:"
+          ls -la "$BINDIR" || true
+          if [ ! -x "$BINDIR/radare2" ] || [ ! -x "$BINDIR/radiff2" ]; then
+            echo "[!] radare2/radiff2 were not built — aborting"
+            exit 1
+          fi
+
+      - name: Prepare invocation profiles
+        run: |
+          # Shared helper sourced by the dry-run, fuzz and triage steps so the exact
+          # recorded per-CVE invocations stay in one place. $BINDIR is resolved at
+          # call time from the environment exported by the build step.
+          cat > /tmp/r2_profiles.sh <<'EOF'
+          PROFILES="radiff2 r2_import256 r2_load r2_plain r2_aos r2_import1"
+
+          # Map a seed basename (its CVE id) to the invocation it was recorded under.
+          profile_for_seed() {
+            case "$1" in
+              *5641*)  echo radiff2 ;;      # CVE-2025-5641  radiff2 -T POC POC
+              *14760*) echo r2_import256 ;; # CVE-2026-14760 radare2 -i POC malloc://256
+              *14788*) echo r2_load ;;      # CVE-2026-14788 radare2 cmd.load=o-. POC
+              *14015*) echo r2_plain ;;     # CVE-2018-14015 radare2 -q -c q POC
+              *14757*) echo r2_aos ;;       # CVE-2026-14757 radare2 aos 268435456 POC
+              *14787*) echo r2_import1 ;;   # CVE-2026-14787 radare2 -i POC malloc://1
+              *)       echo r2_plain ;;     # default: plain open
+            esac
+          }
+
+          # Build the ARGV global array for a profile, substituting $2 for the input
+          # ("@@" when fuzzing, a real path when replaying/triaging).
+          build_argv() {
+            local prof="$1" in="$2"
+            case "$prof" in
+              radiff2)      ARGV=("$BINDIR/radiff2" -T "$in" "$in") ;;
+              r2_import256) ARGV=("$BINDIR/radare2" -q -N -n -e scr.color=false -i "$in" malloc://256) ;;
+              r2_load)      ARGV=("$BINDIR/radare2" -q -e scr.color=0 -e cmd.load=o-. -c q "$in") ;;
+              r2_plain)     ARGV=("$BINDIR/radare2" -e scr.color=0 -q -c q "$in") ;;
+              r2_aos)       ARGV=("$BINDIR/radare2" -q -N -n -e scr.color=false -c "aos 268435456" -c q "$in") ;;
+              r2_import1)   ARGV=("$BINDIR/radare2" -q -n -N -e scr.color=0 -e scr.interactive=false -i "$in" malloc://1) ;;
+            esac
+          }
+
+          bin_for_profile() {
+            case "$1" in
+              radiff2) echo radiff2 ;;
+              *) echo radare2 ;;
+            esac
+          }
+          EOF
+          echo "[+] Wrote /tmp/r2_profiles.sh"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set +e
+          source /tmp/r2_profiles.sh
+          mkdir -p results/dry_run
+          crash_count=0
+          total=0
+          for seed in seeds/"$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname="$(basename "$seed" .bin)"
+            prof="$(profile_for_seed "$sname")"
+            bname="$(bin_for_profile "$prof")"
+            build_argv "$prof" "$seed"
+            total=$((total + 1))
+            echo "[*] Replaying $sname via profile $prof: ${ARGV[*]}"
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              timeout 120 "${ARGV[@]}" > /dev/null 2> results/dry_run/.stderr_tmp
+            exit_code=$?
+            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+              echo "  [!] CRASH: $sname (exit=$exit_code)"
+              mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          set +e
+          source /tmp/r2_profiles.sh
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_USE_ASAN=1
+          # The seed corpus contains known-crashing PoCs; skip (don't abort on) any
+          # seed that crashes/hangs during calibration for a given profile.
+          export AFL_IGNORE_SEED_PROBLEMS=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+          # Split the total budget across the recorded invocations (min 60s each).
+          nprof=$(echo $PROFILES | wc -w)
+          per=$((FUZZ_DURATION / nprof))
+          [ "$per" -lt 60 ] && per=60
+          for prof in $PROFILES; do
+            build_argv "$prof" "@@"   # @@ = AFL file-input placeholder
+            echo "[*] Fuzzing profile $prof for ${per}s: ${ARGV[*]}"
+            afl-fuzz \
+              -i "seeds/$PROJECT" \
+              -o "results/afl/$prof" \
+              -V "$per" \
+              -- "${ARGV[@]}" || true
+          done
+          echo "[+] Fuzzing step finished"
+
+      - name: Triage crashes
+        run: |
+          set +e
+          source /tmp/r2_profiles.sh
+          mkdir -p results/fuzz
+          n=0
+          for prof in $PROFILES; do
+            crash_dir="results/afl/$prof/default/crashes"
+            [ -d "$crash_dir" ] || continue
+            bname="$(bin_for_profile "$prof")"
+            for crash in "$crash_dir"/*; do
+              [ -f "$crash" ] || continue
+              cname="$(basename "$crash")"
+              [ "$cname" = "README.txt" ] && continue
+              n=$((n + 1))
+              build_argv "$prof" "$crash"
+              echo "[*] Triaging $prof/$cname ..."
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 \
+                timeout 120 "${ARGV[@]}" > /dev/null 2> "results/fuzz/${bname}_${prof}_${cname}.txt"
+              cp "$crash" "results/fuzz/${bname}_${prof}_${cname}.bin"
+            done
+          done
+          echo "[+] Triaged $n crashing inputs"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-radare2
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-radare2
+          path: results/
+          retention-days: 30

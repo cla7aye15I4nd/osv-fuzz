@@ -1,0 +1,172 @@
+name: "Fuzz native libeconf"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: libeconf
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Install Meson and Ninja
+        run: |
+          set -eux
+          sudo apt-get install -y -qq meson ninja-build 2>/dev/null || \
+            python3 -m pip install --user meson ninja
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Clone and build latest libeconf with AFL++ + ASan
+        run: |
+          set -euxo pipefail
+          # Use AFL++ compilers with AddressSanitizer instrumentation.
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/openSUSE/libeconf.git /tmp/src/libeconf
+          cd /tmp/src/libeconf
+          # Meson + Ninja build. Keep ASan + frame pointers; disable link-undef
+          # checks and _FORTIFY_SOURCE so the AFL/ASan build links cleanly.
+          meson setup build \
+            --buildtype=debug \
+            -Db_sanitize=address \
+            -Db_lundef=false \
+            -Dc_args="-g -O1 -fsanitize=address -fno-omit-frame-pointer -U_FORTIFY_SOURCE" \
+            -Dc_link_args="-fsanitize=address"
+          ninja -C build
+
+          SRC="$PWD"
+          BINDIR="$PWD/build"
+          BIN="$BINDIR/econftool"    # CLI tool: econftool show <config-file>
+          echo "SRC=$SRC" >> "$GITHUB_ENV"
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          echo "[+] Built econftool target: $BIN"
+          file "$BIN" || true
+          test -x "$BIN"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -uo pipefail
+          mkdir -p results/dry_run
+          bname="$(basename "$BIN")"
+          crash_count=0
+          total=0
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname="$(basename "$seed" .bin)"
+            # econftool requires an ABSOLUTE path to the config file.
+            abs_seed="$(readlink -f "$seed")"
+            result_file="results/dry_run/${bname}_${sname}.txt"
+            total=$((total + 1))
+            echo "[*] Replaying $bname show with $sname..."
+            set +e
+            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+              timeout 30 "$BIN" show "$abs_seed" > /dev/null 2> results/dry_run/.stderr_tmp
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+              echo "  [!] CRASH: $sname (exit=$exit_code)"
+              mv results/dry_run/.stderr_tmp "$result_file"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -uo pipefail
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_NO_UI=1
+          # econftool takes the config file as a positional arg after "show".
+          # AFL++ substitutes @@ with an absolute path to the current input,
+          # which is exactly what econftool requires.
+          afl-fuzz -i "seeds/$PROJECT" -o results/afl -m none \
+            -V "$FUZZ_DURATION" -- "$BIN" show @@ || true
+          echo "[+] Fuzzing step finished"
+          ls -la results/afl/default/crashes/ 2>/dev/null || true
+
+      - name: Triage AFL crashes
+        run: |
+          set -uo pipefail
+          mkdir -p results/fuzz
+          bname="$(basename "$BIN")"
+          crash_dir="results/afl/default/crashes"
+          new_crashes=0
+          if [ -d "$crash_dir" ]; then
+            for crash_file in "$crash_dir"/*; do
+              [ -f "$crash_file" ] || continue
+              case "$(basename "$crash_file")" in
+                README.txt) continue ;;
+              esac
+              abs_crash="$(readlink -f "$crash_file")"
+              crash_id="$(basename "$crash_file" | tr ':,' '__')"
+              result_file="results/fuzz/${bname}_${crash_id}.txt"
+              set +e
+              ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+                timeout 30 "$BIN" show "$abs_crash" > /dev/null 2> "$result_file"
+              replay_exit=$?
+              set -e
+              if [ "$replay_exit" -ne 0 ] && [ "$replay_exit" -ne 124 ]; then
+                echo "  [!] CONFIRMED CRASH: $crash_id"
+                cp "$crash_file" "results/fuzz/${bname}_${crash_id}.bin"
+                new_crashes=$((new_crashes + 1))
+              else
+                rm -f "$result_file"
+              fi
+            done
+          fi
+          echo "[+] Triage complete: $new_crashes confirmed crashes"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-libeconf
+          path: results/
+          retention-days: 30
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-libeconf
+          path: results/pocs/
+          retention-days: 90

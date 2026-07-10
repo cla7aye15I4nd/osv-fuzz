@@ -1,0 +1,142 @@
+name: "Fuzz native libjpeg"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: libjpeg
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find seeds/${{ env.PROJECT }}/ -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la seeds/${{ env.PROJECT }}/ 2>/dev/null | head -20
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone latest upstream source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/thorfdbg/libjpeg.git /tmp/src/libjpeg
+
+      - name: Build CLI tool with AFL++ + ASan
+        run: |
+          set -e
+          # thorfdbg/libjpeg uses a hand-written ./configure + make (C++ sources).
+          # It honours CC/CXX/CFLAGS/CXXFLAGS/LDFLAGS and builds the "jpeg"
+          # command-line en/decoder at the repo root.
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export LDFLAGS="-fsanitize=address"
+          cd /tmp/src/libjpeg
+          ./configure
+          make -j"$(nproc)"
+          BINDIR="$(pwd)"
+          BIN="$BINDIR/jpeg"
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          echo "[+] Built CLI tool:"
+          ls -la "$BIN"
+          if [ ! -x "$BIN" ]; then
+            echo "[!] Expected 'jpeg' binary not built — build failed"
+            exit 1
+          fi
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set +e
+          mkdir -p results/dry_run
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          # Recorded invocation: $BIN $POC /dev/null
+          bname="jpeg"
+          crash_count=0
+          total=0
+          for seed in seeds/${{ env.PROJECT }}/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            POC="$seed"
+            [ -x "$BIN" ] || continue
+            total=$((total + 1))
+            echo "[*] Replaying $bname with $sname..."
+            timeout 60 "$BIN" "$POC" /dev/null > /dev/null 2> results/dry_run/.stderr_tmp
+            ec=$?
+            if [ $ec -ne 0 ] && [ $ec -ne 124 ]; then
+              echo "  [!] CRASH: $bname with $sname (exit=$ec)"
+              mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
+
+      - name: Fuzz with AFL++
+        run: |
+          set +e
+          mkdir -p results
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          # Invocation with AFL's input placeholder: jpeg @@ /dev/null
+          afl-fuzz -i seeds/${{ env.PROJECT }} -o results/afl -V "$FUZZ_DURATION" \
+            -- "$BIN" @@ /dev/null || true
+
+      - name: Triage AFL++ crashes
+        run: |
+          set +e
+          mkdir -p results/fuzz
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          bname="jpeg"
+          shopt -s nullglob
+          for crash in results/afl/default/crashes/*; do
+            [ -f "$crash" ] || continue
+            cname=$(basename "$crash")
+            [ "$cname" = "README.txt" ] && continue
+            echo "[*] Triaging $cname..."
+            "$BIN" "$crash" /dev/null > /dev/null 2> "results/fuzz/${bname}_${cname}.txt"
+            cp "$crash" "results/fuzz/${bname}_${cname}.bin"
+          done
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

@@ -1,0 +1,178 @@
+name: "Fuzz native jhead"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: jhead
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Build jhead (latest) with AFL++ and AddressSanitizer
+        run: |
+          set -e
+          mkdir -p /tmp/src
+          rm -rf /tmp/src/jhead
+          git clone --depth 1 https://github.com/matthias-wandel/jhead.git /tmp/src/jhead
+          cd /tmp/src/jhead
+          # AFL++ instrumentation + ASan (adapted from the recorded Clang recipe).
+          # jhead ships a plain Unix makefile; its link line also passes $(CFLAGS),
+          # so -fsanitize=address is applied at both compile and link time.
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          make CC=afl-cc CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          BIN="/tmp/src/jhead/jhead"
+          if [ ! -x "$BIN" ]; then
+            echo "[!] Build failed — jhead binary not found at $BIN"
+            exit 1
+          fi
+          echo "[+] Built $BIN"
+          echo "BINDIR=/tmp/src/jhead" >> "$GITHUB_ENV"
+          echo "TARGET_BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -u
+          BIN="$TARGET_BIN"
+          bname=$(basename "$BIN")
+          mkdir -p results/dry_run
+          shopt -s nullglob
+          # CVE-2022-28550: buffer overflow while expanding the -cmd format string.
+          # The recorded PoC passes a very long run of "&i " tokens terminated by
+          # "&p"; reconstruct it deterministically so the fixed-size command buffer
+          # in jhead's DoCommand()/command expansion overflows under ASan.
+          CMD=$(printf '&i %.0s' $(seq 1 2000)); CMD="${CMD}&p"
+          crashes=0
+          total=0
+          for seed in "seeds/$PROJECT"/*.bin; do
+            sname=$(basename "$seed" .bin)
+            out="results/dry_run/${bname}_${sname}.txt"
+            total=$((total + 1))
+            echo "[*] Replaying seed $sname ..."
+            # jhead may modify the file in place, so replay against a scratch copy.
+            work="$(mktemp -d)/${sname}.jpg"
+            cp "$seed" "$work"
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              "$BIN" -cmd "$CMD" "$work" > /dev/null 2> "$out.tmp"
+            code=$?
+            set -e
+            rm -rf "$(dirname "$work")"
+            if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
+              echo "  [!] CRASH: $sname (exit=$code)"
+              mv "$out.tmp" "$out"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crashes=$((crashes + 1))
+            else
+              rm -f "$out.tmp"
+            fi
+          done
+          echo "[+] Dry run complete: $crashes crashes out of $total seeds"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -u
+          BIN="$TARGET_BIN"
+          mkdir -p results/afl
+          shopt -s nullglob
+          # Ensure AFL always has at least one input in the corpus dir.
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          if [ "$seed_count" -eq 0 ]; then
+            mkdir -p seeds/"$PROJECT"
+            printf '\xff\xd8\xff\xe1\x00\x16Exif\x00\x00' > "seeds/$PROJECT/minimal_seed.bin"
+          fi
+          echo "[+] Fuzzing corpus size: $(find "seeds/$PROJECT/" -type f | wc -l)"
+          # Same -cmd trigger string as the dry-run; only the input file becomes @@.
+          CMD=$(printf '&i %.0s' $(seq 1 2000)); CMD="${CMD}&p"
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_NO_UI=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          # jhead takes the image path as a positional arg -> AFL feeds it via @@.
+          # Guard with || true so a target that cannot start does not fail the job.
+          afl-fuzz -i "seeds/$PROJECT" -o results/afl -m none -V "$FUZZ_DURATION" \
+            -- "$BIN" -cmd "$CMD" @@ || true
+
+      - name: Triage fuzzing crashes
+        run: |
+          set -u
+          BIN="$TARGET_BIN"
+          bname=$(basename "$BIN")
+          mkdir -p results/fuzz
+          crash_dir="results/afl/default/crashes"
+          shopt -s nullglob
+          CMD=$(printf '&i %.0s' $(seq 1 2000)); CMD="${CMD}&p"
+          new=0
+          if [ -d "$crash_dir" ]; then
+            for crash in "$crash_dir"/*; do
+              [ -f "$crash" ] || continue
+              cbn=$(basename "$crash")
+              [ "$cbn" = "README.txt" ] && continue
+              cid=$(echo "$cbn" | tr ':,' '__')
+              out="results/fuzz/${bname}_${cid}.txt"
+              work="$(mktemp -d)/input.jpg"
+              cp "$crash" "$work"
+              set +e
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+                "$BIN" -cmd "$CMD" "$work" > /dev/null 2> "$out"
+              code=$?
+              set -e
+              rm -rf "$(dirname "$work")"
+              if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
+                echo "  [!] NEW CRASH: $cid (exit=$code)"
+                cp "$crash" "results/fuzz/${bname}_${cid}.bin"
+                new=$((new + 1))
+              else
+                rm -f "$out"
+              fi
+            done
+          fi
+          echo "[+] Triage complete: $new reproducible crashes"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-jhead
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-jhead
+          path: results/
+          retention-days: 30

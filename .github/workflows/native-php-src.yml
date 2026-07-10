@@ -1,0 +1,160 @@
+name: "Fuzz native php-src"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: php-src
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Install php-src build dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            re2c \
+            bison \
+            libxml2-dev \
+            libsqlite3-dev \
+            2>/dev/null || true
+
+      - name: Clone and build latest php-src with AFL++ + ASan
+        run: |
+          set -e
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/php/php-src.git /tmp/src/php-src
+          cd /tmp/src/php-src
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export LDFLAGS="-fsanitize=address"
+          ./buildconf --force
+          # --enable-gd builds the bundled libgd (XBM support via libgd/gd_xbm.c).
+          ./configure --enable-gd --enable-cli --disable-all --without-pear
+          make -j"$(nproc)"
+          # Built CLI binary: sapi/cli/php
+          echo "BINDIR=/tmp/src/php-src/sapi/cli" >> "$GITHUB_ENV"
+          echo "PHP_BIN=/tmp/src/php-src/sapi/cli/php" >> "$GITHUB_ENV"
+          ls -la /tmp/src/php-src/sapi/cli/php
+
+      - name: Verify target binary
+        run: |
+          "$PHP_BIN" --version || true
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          mkdir -p results/dry_run
+          bname="php"
+          shopt -s nullglob
+          crash_count=0
+          total=0
+          for seed in seeds/"$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            total=$((total + 1))
+            echo "[*] Replaying $sname through $bname..."
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+            timeout 60 "$PHP_BIN" -d error_reporting=0 "$seed" \
+              > /dev/null 2> results/dry_run/.stderr_tmp
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
+              echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
+              mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          mkdir -p results/afl
+          set +e
+          AFL_SKIP_CPUFREQ=1 \
+          AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+          AFL_NO_UI=1 \
+          timeout "$FUZZ_DURATION" \
+            afl-fuzz -i seeds/"$PROJECT" -o results/afl -m none \
+              -V "$FUZZ_DURATION" \
+              -- "$PHP_BIN" -d error_reporting=0 @@
+          echo "[+] afl-fuzz exited with code $?"
+          set -e
+          true
+
+      - name: Triage crashes
+        run: |
+          mkdir -p results/fuzz
+          bname="php"
+          shopt -s nullglob
+          crash_dir="results/afl/default/crashes"
+          if [ -d "$crash_dir" ]; then
+            for crash_file in "$crash_dir"/*; do
+              [ -f "$crash_file" ] || continue
+              cname=$(basename "$crash_file")
+              [ "$cname" = "README.txt" ] && continue
+              safe=$(echo "$cname" | tr ':,' '__')
+              result_file="results/fuzz/${bname}_${safe}.txt"
+              set +e
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              timeout 60 "$PHP_BIN" -d error_reporting=0 "$crash_file" \
+                > /dev/null 2> "$result_file"
+              replay_exit=$?
+              set -e
+              if [ "$replay_exit" -ne 0 ] && [ "$replay_exit" -ne 124 ]; then
+                echo "  [!] Confirmed crash: $cname"
+                cp "$crash_file" "results/fuzz/${bname}_${safe}.bin"
+              else
+                rm -f "$result_file"
+              fi
+            done
+          else
+            echo "[+] No crashes directory produced"
+          fi
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-php-src
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-php-src
+          path: results/
+          retention-days: 30

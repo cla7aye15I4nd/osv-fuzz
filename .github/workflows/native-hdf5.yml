@@ -1,0 +1,148 @@
+name: "Fuzz native hdf5"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: hdf5
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find seeds/${{ env.PROJECT }}/ -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la seeds/${{ env.PROJECT }}/ 2>/dev/null | head -20
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone latest upstream source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/HDFGroup/hdf5.git /tmp/src/hdf5
+
+      - name: Build CLI tools with AFL++ + ASan
+        run: |
+          set -e
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          cd /tmp/src/hdf5
+          # HDF5 develop / 2.x is CMake-only. Build static CLI tools (h5dump, ...)
+          # with AFL++ instrumentation + AddressSanitizer.
+          cmake -S . -B build \
+            -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=afl-cc \
+            -DCMAKE_CXX_COMPILER=afl-c++ \
+            -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
+            -DHDF5_BUILD_TOOLS=ON \
+            -DHDF5_BUILD_EXAMPLES=OFF \
+            -DBUILD_TESTING=OFF \
+            -DBUILD_SHARED_LIBS=OFF
+          cmake --build build -j"$(nproc)"
+          # CLI tools land in build/bin/
+          BINDIR="$(pwd)/build/bin"
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "[+] Built CLI tools in $BINDIR:"
+          ls -la "$BINDIR"/h5dump || true
+          if [ ! -x "$BINDIR/h5dump" ]; then
+            echo "[!] Expected CLI binary h5dump not built — build failed"
+            exit 1
+          fi
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set +e
+          mkdir -p results/dry_run
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          # All recorded PoCs use the same invocation: h5dump $POC
+          bin="$BINDIR/h5dump"
+          label="h5dump"
+          crash_count=0
+          total=0
+          for seed in seeds/${{ env.PROJECT }}/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            POC="$seed"
+            [ -x "$bin" ] || continue
+            total=$((total + 1))
+            echo "[*] Replaying $label with $sname..."
+            timeout 60 "$bin" "$POC" > /dev/null 2> results/dry_run/.stderr_tmp
+            ec=$?
+            if [ $ec -ne 0 ] && [ $ec -ne 124 ]; then
+              echo "  [!] CRASH: $label with $sname (exit=$ec)"
+              mv results/dry_run/.stderr_tmp "results/dry_run/${label}_${sname}.txt"
+              cp "$seed" "results/dry_run/${label}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
+
+      - name: Fuzz with AFL++
+        run: |
+          set +e
+          mkdir -p results
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          # Fuzz the primary file-consuming CLI (h5dump <file>).
+          afl-fuzz -i seeds/${{ env.PROJECT }} -o results/afl -V "$FUZZ_DURATION" \
+            -- "$BINDIR/h5dump" @@ || true
+
+      - name: Triage AFL++ crashes
+        run: |
+          set +e
+          mkdir -p results/fuzz
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          shopt -s nullglob
+          for crash in results/afl/default/crashes/*; do
+            [ -f "$crash" ] || continue
+            cname=$(basename "$crash")
+            [ "$cname" = "README.txt" ] && continue
+            echo "[*] Triaging $cname..."
+            "$BINDIR/h5dump" "$crash" > /dev/null 2> "results/fuzz/h5dump_${cname}.txt"
+            cp "$crash" "results/fuzz/h5dump_${cname}.bin"
+          done
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

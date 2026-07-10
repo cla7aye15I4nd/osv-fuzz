@@ -1,0 +1,152 @@
+name: "Fuzz native libjpeg-turbo"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: libjpeg-turbo
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find seeds/${{ env.PROJECT }}/ -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la seeds/${{ env.PROJECT }}/ 2>/dev/null | head -20
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone latest upstream source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/src/libjpeg-turbo
+
+      - name: Build CLI tools with AFL++ + ASan
+        run: |
+          set -e
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          cd /tmp/src/libjpeg-turbo
+          mkdir -p build && cd build
+          cmake -G"Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=None \
+            -DCMAKE_C_COMPILER=afl-cc \
+            -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address" \
+            -DWITH_ARITH_ENC=1 -DWITH_ARITH_DEC=1 \
+            ..
+          make -j"$(nproc)"
+          # CLI tools land in the build directory root
+          BINDIR="$(pwd)"
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "[+] Built CLI tools in $BINDIR:"
+          ls -la "$BINDIR"/djpeg "$BINDIR"/cjpeg
+          if [ ! -x "$BINDIR/djpeg" ] || [ ! -x "$BINDIR/cjpeg" ]; then
+            echo "[!] Expected CLI binaries not built — build failed"
+            exit 1
+          fi
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set +e
+          mkdir -p results/dry_run
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          # Parallel arrays: one entry per recorded invocation.
+          #   LABELS -> unique result-name prefix
+          #   BINS   -> CLI binary under $BINDIR
+          #   ARGS   -> args before the input path ($POC)
+          LABELS=("djpeg_nosmooth" "djpeg_skip" "cjpeg" "cjpeg_out")
+          BINS=("djpeg" "djpeg" "cjpeg" "cjpeg")
+          ARGS=("-nosmooth" "-fast -skip 1,20 -outfile /dev/null" "" "-outfile /dev/null")
+          crash_count=0
+          total=0
+          for seed in seeds/${{ env.PROJECT }}/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            POC="$seed"
+            for i in "${!LABELS[@]}"; do
+              label="${LABELS[$i]}"
+              bin="$BINDIR/${BINS[$i]}"
+              [ -x "$bin" ] || continue
+              total=$((total + 1))
+              echo "[*] Replaying $label with $sname..."
+              # shellcheck disable=SC2086
+              timeout 60 "$bin" ${ARGS[$i]} "$POC" > /dev/null 2> results/dry_run/.stderr_tmp
+              ec=$?
+              if [ $ec -ne 0 ] && [ $ec -ne 124 ]; then
+                echo "  [!] CRASH: $label with $sname (exit=$ec)"
+                mv results/dry_run/.stderr_tmp "results/dry_run/${label}_${sname}.txt"
+                cp "$seed" "results/dry_run/${label}_${sname}.bin"
+                crash_count=$((crash_count + 1))
+              else
+                rm -f results/dry_run/.stderr_tmp
+              fi
+            done
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
+
+      - name: Fuzz with AFL++
+        run: |
+          set +e
+          mkdir -p results
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          # Fuzz the primary JPEG decoder path (djpeg -nosmooth).
+          afl-fuzz -i seeds/${{ env.PROJECT }} -o results/afl -V "$FUZZ_DURATION" \
+            -- "$BINDIR/djpeg" -nosmooth @@ || true
+
+      - name: Triage AFL++ crashes
+        run: |
+          set +e
+          mkdir -p results/fuzz
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          shopt -s nullglob
+          for crash in results/afl/default/crashes/*; do
+            [ -f "$crash" ] || continue
+            cname=$(basename "$crash")
+            [ "$cname" = "README.txt" ] && continue
+            echo "[*] Triaging $cname..."
+            "$BINDIR/djpeg" -nosmooth "$crash" > /dev/null 2> "results/fuzz/djpeg_nosmooth_${cname}.txt"
+            cp "$crash" "results/fuzz/djpeg_nosmooth_${cname}.bin"
+          done
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ ${{ env.PROJECT }}
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-${{ env.PROJECT }}
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-${{ env.PROJECT }}
+          path: results/
+          retention-days: 30

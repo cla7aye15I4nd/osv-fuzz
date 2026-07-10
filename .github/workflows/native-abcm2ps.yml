@@ -1,0 +1,179 @@
+name: "Fuzz native abcm2ps"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: abcm2ps
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Build abcm2ps (latest) with AFL++ and AddressSanitizer
+        run: |
+          set -e
+          # unzip is needed to expand the zip-packed PoC seeds
+          sudo apt-get install -y -qq unzip 2>/dev/null || true
+          mkdir -p /tmp/src
+          rm -rf /tmp/src/abcm2ps
+          git clone --depth 1 https://github.com/lewdlime/abcm2ps.git /tmp/src/abcm2ps
+          cd /tmp/src/abcm2ps
+          # AFL++ instrumentation + ASan (adapted from the recorded Clang recipe).
+          # The hand-written ./configure reads CC/CFLAGS/LDFLAGS from the env and
+          # generates a Makefile from Makefile.in. pango support auto-disables if
+          # freetype2/pangocairo are absent (not needed for these bugs).
+          export CC=afl-cc
+          export CXX=afl-c++
+          export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export LDFLAGS="-fsanitize=address -fno-omit-frame-pointer"
+          ./configure
+          make
+          BIN="/tmp/src/abcm2ps/abcm2ps"
+          if [ ! -x "$BIN" ]; then
+            echo "[!] Build failed — abcm2ps binary not found at $BIN"
+            exit 1
+          fi
+          echo "[+] Built $BIN"
+          echo "BINDIR=/tmp/src/abcm2ps" >> "$GITHUB_ENV"
+          echo "TARGET_BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -u
+          BIN="$TARGET_BIN"
+          bname=$(basename "$BIN")
+          mkdir -p results/dry_run
+          shopt -s nullglob
+          crashes=0
+          total=0
+          for seed in "seeds/$PROJECT"/*.bin; do
+            sname=$(basename "$seed" .bin)
+            out="results/dry_run/${bname}_${sname}.txt"
+            total=$((total + 1))
+            echo "[*] Replaying seed $sname ..."
+            # Recorded invocation: unzip -p "$POC" | abcm2ps -
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              bash -c 'unzip -p "$1" | "$2" -' _ "$seed" "$BIN" \
+              > /dev/null 2> "$out.tmp"
+            code=$?
+            set -e
+            if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
+              echo "  [!] CRASH: $sname (exit=$code)"
+              mv "$out.tmp" "$out"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crashes=$((crashes + 1))
+            else
+              rm -f "$out.tmp"
+            fi
+          done
+          echo "[+] Dry run complete: $crashes crashes out of $total seeds"
+
+      - name: Fuzz with AFL++
+        run: |
+          set -u
+          BIN="$TARGET_BIN"
+          mkdir -p results/afl corpus
+          shopt -s nullglob
+          # abcm2ps reads abc text from stdin ('-'); the PoC seeds are zip files,
+          # so expand them into a raw-abc corpus that AFL can meaningfully mutate.
+          n=0
+          for seed in "seeds/$PROJECT"/*.bin; do
+            sname=$(basename "$seed" .bin)
+            if unzip -p "$seed" > "corpus/$sname" 2>/dev/null && [ -s "corpus/$sname" ]; then
+              n=$((n + 1))
+            else
+              rm -f "corpus/$sname"
+            fi
+          done
+          if [ "$n" -eq 0 ]; then
+            echo "X:1" > corpus/minimal_seed
+          fi
+          echo "[+] Fuzzing corpus size: $(ls -1 corpus | wc -l)"
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_NO_UI=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          # Target reads stdin via '-', so no @@ — AFL feeds each testcase on stdin.
+          afl-fuzz -i corpus -o results/afl -m none -V "$FUZZ_DURATION" -- "$BIN" - || true
+
+      - name: Triage fuzzing crashes
+        run: |
+          set -u
+          BIN="$TARGET_BIN"
+          bname=$(basename "$BIN")
+          mkdir -p results/fuzz
+          crash_dir="results/afl/default/crashes"
+          shopt -s nullglob
+          new=0
+          if [ -d "$crash_dir" ]; then
+            for crash in "$crash_dir"/*; do
+              [ -f "$crash" ] || continue
+              cbn=$(basename "$crash")
+              [ "$cbn" = "README.txt" ] && continue
+              cid=$(echo "$cbn" | tr ':,' '__')
+              out="results/fuzz/${bname}_${cid}.txt"
+              # Crash inputs are raw abc (corpus was pre-decompressed), so feed
+              # them directly on stdin — do NOT unzip fuzzer-mutated inputs.
+              set +e
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+                "$BIN" - < "$crash" > /dev/null 2> "$out"
+              code=$?
+              set -e
+              if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
+                echo "  [!] NEW CRASH: $cid (exit=$code)"
+                cp "$crash" "results/fuzz/${bname}_${cid}.bin"
+                new=$((new + 1))
+              else
+                rm -f "$out"
+              fi
+            done
+          fi
+          echo "[+] Triage complete: $new reproducible crashes"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-abcm2ps
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-abcm2ps
+          path: results/
+          retention-days: 30

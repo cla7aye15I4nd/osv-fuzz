@@ -1,0 +1,159 @@
+name: "Fuzz native opencc"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: opencc
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone latest upstream source
+        run: |
+          mkdir -p /tmp/src
+          git clone --depth 1 --recursive https://github.com/BYVoid/OpenCC.git /tmp/src/opencc
+
+      - name: Build opencc with AFL++ + AddressSanitizer
+        run: |
+          set -e
+          export AFL_USE_ASAN=1
+          cd /tmp/src/opencc
+          mkdir -p build && cd build
+          CC=afl-cc CXX=afl-c++ cmake \
+            -DCMAKE_C_COMPILER=afl-cc -DCMAKE_CXX_COMPILER=afl-c++ \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DBUILD_DOCUMENTATION=OFF -DENABLE_GTEST=OFF -DENABLE_BENCHMARK=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_INSTALL_PREFIX="$PWD/_install" \
+            ..
+          make -j"$(nproc)"
+          make install
+          BINDIR="$PWD/_install/bin"
+          DATADIR="$PWD/_install/share/opencc"
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "DATADIR=$DATADIR" >> "$GITHUB_ENV"
+          echo "[+] Built CLI:"
+          ls -la "$BINDIR/opencc"
+          echo "[+] Data dir:"
+          ls -la "$DATADIR" | head -20
+          if [ ! -x "$BINDIR/opencc" ]; then
+            echo "[!] opencc binary not built — build failed"
+            exit 1
+          fi
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          mkdir -p results/dry_run
+          bname=opencc
+          crash_count=0
+          total=0
+          for seed in "seeds/$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname=$(basename "$seed" .bin)
+            result_file="results/dry_run/${bname}_${sname}.txt"
+            total=$((total + 1))
+            echo "[*] Replaying $bname with $sname..."
+            set +e
+            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+            OPENCC_DATA_DIR="$DATADIR" \
+            timeout 30 "$BINDIR/opencc" -c s2t.json < "$seed" > /dev/null 2> results/dry_run/.stderr_tmp
+            exit_code=$?
+            set -e
+            if [ $exit_code -ne 0 ] && [ $exit_code -ne 124 ]; then
+              echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
+              mv results/dry_run/.stderr_tmp "$result_file"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crash_count=$((crash_count + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+
+      - name: Fuzz with AFL++
+        run: |
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export OPENCC_DATA_DIR="$DATADIR"
+          # opencc reads the document from stdin; AFL feeds stdin when @@ is omitted.
+          afl-fuzz \
+            -i "seeds/$PROJECT" \
+            -o results/afl \
+            -V "$FUZZ_DURATION" \
+            -- "$BINDIR/opencc" -c s2t.json || true
+
+      - name: Triage AFL++ crashes
+        run: |
+          mkdir -p results/fuzz
+          bname=opencc
+          crashes_dir="results/afl/default/crashes"
+          if [ ! -d "$crashes_dir" ]; then
+            echo "[+] No crashes directory — nothing to triage"
+            exit 0
+          fi
+          triaged=0
+          for crash in "$crashes_dir"/*; do
+            [ -f "$crash" ] || continue
+            cname=$(basename "$crash")
+            [ "$cname" = "README.txt" ] && continue
+            result_file="results/fuzz/${bname}_${cname}.txt"
+            echo "[*] Triaging $cname..."
+            set +e
+            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
+            OPENCC_DATA_DIR="$DATADIR" \
+            timeout 30 "$BINDIR/opencc" -c s2t.json < "$crash" > /dev/null 2> "$result_file"
+            set -e
+            cp "$crash" "results/fuzz/${bname}_${cname}.bin"
+            triaged=$((triaged + 1))
+          done
+          echo "[+] Triaged $triaged crashing inputs"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-opencc
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-opencc
+          path: results/
+          retention-days: 30

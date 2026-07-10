@@ -1,0 +1,152 @@
+name: "Fuzz native libsolv"
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzz_duration:
+        description: "Fuzzing duration in seconds"
+        default: "1800"
+  schedule:
+    - cron: "0 13 * * 0"
+
+env:
+  PROJECT: libsolv
+  FUZZ_DURATION: ${{ inputs.fuzz_duration || '1800' }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  R2_BUCKET: osv-fuzz-seeds
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout osv-fuzz
+        uses: actions/checkout@v4
+
+      - name: Download native seeds from R2
+        run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Install AFL++ and dependencies
+        run: bash scripts/setup_aflpp.sh
+
+      - name: Clone latest libsolv source and build with AFL++ + ASan
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/opensuse/libsolv /tmp/src/libsolv
+          # libsolv needs zlib for the repo tools (testsolv reads solv/repo files)
+          sudo apt-get install -y -qq zlib1g-dev libzstd-dev 2>/dev/null || true
+          cd /tmp/src/libsolv
+          mkdir -p build
+          cd build
+          export AFL_USE_ASAN=1
+          # libsolv's real build system is CMake; drive it with the AFL++ ASan toolchain.
+          cmake .. \
+            -DCMAKE_C_COMPILER=afl-cc \
+            -DCMAKE_CXX_COMPILER=afl-c++ \
+            -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
+            -DENABLE_STATIC=OFF \
+            -DDISABLE_SHARED=OFF
+          make -j"$(nproc)" testsolv
+          # Locate the built testsolv CLI binary and record its path.
+          BIN="$(find "$PWD" -type f -name testsolv -perm -u+x | head -1)"
+          if [ -z "$BIN" ]; then
+            echo "[!] testsolv binary not found after build"
+            find "$PWD" -name 'testsolv*' -type f || true
+            exit 1
+          fi
+          echo "[+] Built testsolv at $BIN"
+          echo "BINDIR=$(dirname "$BIN")" >> "$GITHUB_ENV"
+          echo "TARGET_BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Dry-run replay (lost-bug check)
+        run: |
+          set -u
+          mkdir -p results/dry_run
+          bname="testsolv"
+          crashes=0
+          total=0
+          shopt -s nullglob
+          for seed in seeds/"$PROJECT"/*.bin; do
+            [ -f "$seed" ] || continue
+            sname="$(basename "$seed" .bin)"
+            total=$((total + 1))
+            echo "[*] Replaying $sname through $bname..."
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+              timeout 60 "$TARGET_BIN" "$seed" > /dev/null 2> results/dry_run/.stderr_tmp
+            ec=$?
+            set -e
+            if [ "$ec" -ne 0 ] && [ "$ec" -ne 124 ]; then
+              echo "  [!] CRASH: $sname (exit=$ec)"
+              mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
+              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              crashes=$((crashes + 1))
+            else
+              rm -f results/dry_run/.stderr_tmp
+            fi
+          done
+          echo "[+] Dry run complete: $crashes crashes out of $total seeds"
+
+      - name: Fuzz with AFL++
+        run: |
+          set +e
+          mkdir -p results/afl
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_USE_ASAN=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+          afl-fuzz \
+            -i seeds/"$PROJECT" \
+            -o results/afl \
+            -V "$FUZZ_DURATION" \
+            -- "$TARGET_BIN" @@
+          echo "[+] Fuzzing step finished (exit=$?)"
+          true
+
+      - name: Triage crashes
+        run: |
+          set -u
+          mkdir -p results/fuzz
+          bname="testsolv"
+          crash_dir="results/afl/default/crashes"
+          if [ ! -d "$crash_dir" ]; then
+            echo "[+] No crashes directory produced by AFL++"
+            exit 0
+          fi
+          count=0
+          shopt -s nullglob
+          for crash in "$crash_dir"/*; do
+            [ -f "$crash" ] || continue
+            cname="$(basename "$crash")"
+            [ "$cname" = "README.txt" ] && continue
+            count=$((count + 1))
+            echo "[*] Triaging $cname..."
+            set +e
+            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 \
+              timeout 60 "$TARGET_BIN" "$crash" > /dev/null 2> "results/fuzz/${bname}_${cname}.txt"
+            set -e
+            cp "$crash" "results/fuzz/${bname}_${cname}.bin"
+          done
+          echo "[+] Triaged $count crashing inputs"
+
+      - name: Generate report
+        run: python3 scripts/report.py results/ "$PROJECT"
+
+      - name: Upload PoC artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pocs-native-libsolv
+          path: results/pocs/
+          retention-days: 90
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-native-libsolv
+          path: results/
+          retention-days: 30
