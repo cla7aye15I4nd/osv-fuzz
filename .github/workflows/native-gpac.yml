@@ -19,7 +19,7 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
@@ -36,11 +36,15 @@ jobs:
       - name: Install AFL++ and dependencies
         run: |
           bash scripts/setup_aflpp.sh
-          # GPAC's ./configure is hand-written (NOT autotools/cmake); zlib is the
-          # only extra dep we need for a minimal MP4Box build.
-          sudo apt-get install -y -qq zlib1g-dev 2>/dev/null || true
+          # GPAC's ./configure is hand-written (NOT autotools/cmake/meson).
+          # Install the optional dev libs a fuller MP4Box/gpac build wants; all
+          # are best-effort so a missing package never aborts the job.
+          sudo apt-get install -y -qq \
+            zlib1g-dev \
+            libssl-dev \
+            2>/dev/null || true
 
-      - name: Build latest gpac with AFL++ + ASan
+      - name: Clone and build latest gpac with AFL++ + ASan
         run: |
           set -euo pipefail
 
@@ -51,12 +55,31 @@ jobs:
 
           SRC=/tmp/gpac
           rm -rf "$SRC"
-          git clone --depth 1 https://github.com/gpac/gpac.git "$SRC"
+
+          # Robust clone: submodules + 3x retry (transient network failures are
+          # the most common CI flake).
+          cloned=0
+          for attempt in 1 2 3; do
+            if git clone --depth 1 --recurse-submodules \
+                 https://github.com/gpac/gpac.git "$SRC"; then
+              cloned=1
+              break
+            fi
+            echo "[!] clone attempt $attempt failed; retrying..."
+            rm -rf "$SRC"
+            sleep 5
+          done
+          [ "$cloned" -eq 1 ] || { echo "[!] git clone failed after 3 attempts"; exit 1; }
           cd "$SRC"
+          git submodule update --init --recursive || true
 
           # GPAC uses a hand-written ./configure + make (NOT autotools/cmake/meson).
           # --enable-sanitizer injects "-fsanitize=address -g2 -DASAN_ENABLED";
-          # combined with AFL_USE_ASAN=1 above this builds an AFL+ASan MP4Box.
+          # combined with AFL_USE_ASAN=1 above this yields an AFL+ASan build.
+          # If no ./configure exists (unexpected), fall back to autogen/autoreconf.
+          if [ ! -x ./configure ]; then
+            if [ -x ./autogen.sh ]; then ./autogen.sh || true; else autoreconf -fi || true; fi
+          fi
           ./configure --enable-sanitizer \
             --extra-cflags="-g -O1 -fno-omit-frame-pointer -fsanitize=address" \
             --extra-ldflags="-fsanitize=address"
@@ -68,134 +91,163 @@ jobs:
             exit 1
           fi
 
-          # MP4Box is linked against ./bin/gcc/libgpac.so — expose it to every
-          # later step (dry-run / fuzz / triage) via the job environment.
+          # MP4Box/gpac are linked against ./bin/gcc/libgpac.so — expose the lib
+          # path to every later step (dry-run / fuzz / triage) via the job env.
           echo "SRC=$SRC" >> "$GITHUB_ENV"
           echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$BINDIR:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          export LD_LIBRARY_PATH="$BINDIR:${LD_LIBRARY_PATH:-}"
 
-          # Best-effort media input for the -crypt target (CVE-2019-11222 fuzzes
-          # the DRM cryptfile that is MP4Box's FIRST -crypt argument; it still
-          # needs a media file as its second argument). Pick any seed that
-          # MP4Box can parse cleanly; if none do, the -crypt target is skipped.
-          MEDIA="$SRC/overview.mp4"
+          echo "[+] Built executables in $BINDIR:"
+          ls -la "$BINDIR" || true
+
+          # Best-effort media input for the -crypt target: MP4Box -crypt takes the
+          # POC as its FIRST argument but still needs a real media file as its
+          # SECOND argument. Pick any seed MP4Box can parse cleanly.
+          MEDIA="$SRC/media_ref.mp4"
+          rm -f "$MEDIA"
           for s in "$GITHUB_WORKSPACE/seeds/$PROJECT"/*.bin; do
             [ -f "$s" ] || continue
-            if LD_LIBRARY_PATH="$BINDIR:${LD_LIBRARY_PATH:-}" \
-                 timeout 20 "$BINDIR/MP4Box" -info "$s" >/dev/null 2>&1; then
+            if timeout 20 "$BINDIR/MP4Box" -info "$s" >/dev/null 2>&1; then
               cp "$s" "$MEDIA"
               break
             fi
           done
-          if [ -f "$MEDIA" ]; then
-            echo "MEDIA=$MEDIA" >> "$GITHUB_ENV"
-            echo "[+] -crypt target enabled with media: $MEDIA"
-          else
-            echo "[!] No parseable media seed found — -crypt target disabled"
-          fi
 
-          echo "[+] Built MP4Box:"
-          ls -la "$BINDIR/MP4Box" "$BINDIR"/libgpac.so* || true
+          # ------------------------------------------------------------------
+          # Enumerate every file-input CLI target into a shared targets table
+          # consumed identically by the dry-run / fuzz / triage steps.
+          # Format per line:  label|binary|args-template   (@@ = input path)
+          # MP4Box is one binary with several file-consuming modes (each recorded
+          # PoC invocation becomes its own target); gpac is added when present.
+          # ------------------------------------------------------------------
+          mkdir -p "$GITHUB_WORKSPACE/results"
+          TARGETS_FILE="$GITHUB_WORKSPACE/results/targets.txt"
+          : > "$TARGETS_FILE"
+          {
+            echo "MP4Box_info|MP4Box|-info @@"
+            echo "MP4Box_diso|MP4Box|-diso @@ -out /dev/null"
+            echo "MP4Box_srt|MP4Box|-srt 0 @@"
+            if [ -f "$MEDIA" ]; then
+              echo "MP4Box_crypt|MP4Box|-crypt @@ $MEDIA -out /tmp/enc_out.mp4"
+              echo "MEDIA=$MEDIA" >> "$GITHUB_ENV"
+              echo "[+] -crypt target enabled (media ref: $MEDIA)"
+            else
+              echo "[!] No parseable media seed — -crypt target disabled" 1>&2
+            fi
+            # gpac application binary parses media via the filter graph.
+            if [ -x "$BINDIR/gpac" ]; then
+              echo "gpac_inspect|gpac|-i @@ inspect"
+            fi
+          } >> "$TARGETS_FILE"
+
+          echo "[+] Target table:"
+          cat "$TARGETS_FILE"
 
       - name: Dry-run replay (lost-bug check)
         run: |
-          set -uo pipefail
+          # NOTE: GitHub runs `run` steps under `bash -e`; disable it up front so
+          # a nonzero exit from a replay does not abort the step. Exit codes are
+          # captured explicitly with `rc=0; cmd || rc=$?` — global set -e/+e is
+          # never toggled inside the loop.
+          set +e
           mkdir -p results/dry_run
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
 
-          # target table: "label|pre-args|post-args"
-          # command run is:  MP4Box <pre> <input> <post>
-          #   info :  MP4Box -info <input>              (most CVEs)
-          #   diso :  MP4Box -diso <input> -out /dev/null   (CVE-2019-20208)
-          #   srt  :  MP4Box -srt 0 <input>             (CVE-2018-20763)
-          #   crypt:  MP4Box -crypt <input> <media> -out <tmp>  (CVE-2019-11222)
-          targets=(
-            "info|-info|"
-            "diso|-diso|-out /dev/null"
-            "srt|-srt 0|"
-          )
-          if [ -n "${MEDIA:-}" ] && [ -f "$MEDIA" ]; then
-            targets+=("crypt|-crypt|$MEDIA -out $SRC/enc_out.mp4")
-          fi
-
+          mapfile -t targets < results/targets.txt
           crash_count=0
           total=0
           for entry in "${targets[@]}"; do
-            IFS='|' read -r bname pre post <<< "$entry"
+            [ -n "$entry" ] || continue
+            IFS='|' read -r label bin args <<< "$entry"
             for seed in "seeds/$PROJECT"/*.bin; do
               [ -f "$seed" ] || continue
               sname="$(basename "$seed" .bin)"
-              result_file="results/dry_run/${bname}_${sname}.txt"
+              # Substitute @@ with the concrete input path.
+              run_args=()
+              for a in $args; do
+                if [ "$a" = "@@" ]; then run_args+=("$seed"); else run_args+=("$a"); fi
+              done
               total=$((total + 1))
-              echo "[*] Replaying $bname with $sname..."
-              set +e
-              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
-                timeout 30 "$BINDIR/MP4Box" $pre "$seed" $post \
-                > /dev/null 2> "results/dry_run/.stderr_tmp"
-              exit_code=$?
-              set -e
-              if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
-                echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
-                mv "results/dry_run/.stderr_tmp" "$result_file"
-                cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+              echo "[*] Replaying $label with $sname..."
+              rc=0
+              timeout 30 "$BINDIR/$bin" "${run_args[@]}" \
+                > /dev/null 2> results/dry_run/.stderr_tmp || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] CRASH: $label with $sname (exit=$rc)"
+                mv results/dry_run/.stderr_tmp "results/dry_run/${label}_${sname}.txt"
+                cp "$seed" "results/dry_run/${label}_${sname}.bin"
                 crash_count=$((crash_count + 1))
               else
-                rm -f "results/dry_run/.stderr_tmp"
+                rm -f results/dry_run/.stderr_tmp
               fi
             done
           done
-          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
 
       - name: Fuzz with AFL++
         run: |
-          set -uo pipefail
+          set +e
           mkdir -p results/afl
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
           export AFL_NO_UI=1
 
-          targets=(
-            "info|-info|"
-            "diso|-diso|-out /dev/null"
-            "srt|-srt 0|"
-          )
-          if [ -n "${MEDIA:-}" ] && [ -f "$MEDIA" ]; then
-            targets+=("crypt|-crypt|$MEDIA -out $SRC/enc_out.mp4")
-          fi
+          mapfile -t targets < results/targets.txt
+          # Drop empty lines before counting so the budget split is accurate.
+          valid=()
+          for entry in "${targets[@]}"; do [ -n "$entry" ] && valid+=("$entry"); done
+          targets=("${valid[@]}")
 
-          # Split the total budget evenly across the distinct targets (min 60s each).
           ntargets=${#targets[@]}
+          [ "$ntargets" -ge 1 ] || { echo "[!] no targets to fuzz"; exit 0; }
           per_target=$(( FUZZ_DURATION / ntargets ))
           [ "$per_target" -lt 60 ] && per_target=60
           echo "[+] $ntargets targets, ${per_target}s each"
 
+          seed0="$(find "seeds/$PROJECT" -name '*.bin' -type f | head -1)"
+
           for entry in "${targets[@]}"; do
-            IFS='|' read -r bname pre post <<< "$entry"
-            out="results/afl/$bname"
-            echo "[*] Fuzzing $bname for ${per_target}s..."
-            # @@ is AFL's file input placeholder; guard so a target that cannot
-            # start does not fail the whole job.
+            IFS='|' read -r label bin args <<< "$entry"
+            out="results/afl/$label"
+
+            # afl-showmap startup probe: if the instrumented target cannot even
+            # execute one seed (produces no coverage map), skip it instead of
+            # wasting the whole per-target budget.
+            if [ -n "$seed0" ]; then
+              probe_args=()
+              for a in $args; do
+                if [ "$a" = "@@" ]; then probe_args+=("$seed0"); else probe_args+=("$a"); fi
+              done
+              AFL_QUIET=1 afl-showmap -o "/tmp/map_${label}" -m none -t 10000 \
+                -- "$BINDIR/$bin" "${probe_args[@]}" >/dev/null 2>&1
+              if [ ! -s "/tmp/map_${label}" ]; then
+                echo "[!] $label failed afl-showmap startup — skipping"
+                continue
+              fi
+            fi
+
+            echo "[*] Fuzzing $label for ${per_target}s..."
+            # @@ is AFL's input placeholder; $args is intentionally unquoted so
+            # it word-splits into separate argv entries. Guard so a target that
+            # fails to start does not fail the whole job.
             afl-fuzz -i "seeds/$PROJECT" -o "$out" -m none -V "$per_target" \
-              -- "$BINDIR/MP4Box" $pre @@ $post || true
+              -- "$BINDIR/$bin" $args || true
           done
+          echo "[+] Fuzzing step finished"
 
       - name: Triage AFL++ crashes
         run: |
-          set -uo pipefail
+          set +e
           mkdir -p results/fuzz
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
 
-          targets=(
-            "info|-info|"
-            "diso|-diso|-out /dev/null"
-            "srt|-srt 0|"
-          )
-          if [ -n "${MEDIA:-}" ] && [ -f "$MEDIA" ]; then
-            targets+=("crypt|-crypt|$MEDIA -out $SRC/enc_out.mp4")
-          fi
-
+          mapfile -t targets < results/targets.txt
           new_crashes=0
           for entry in "${targets[@]}"; do
-            IFS='|' read -r bname pre post <<< "$entry"
-            crash_dir="results/afl/$bname/default/crashes"
+            [ -n "$entry" ] || continue
+            IFS='|' read -r label bin args <<< "$entry"
+            crash_dir="results/afl/$label/default/crashes"
             [ -d "$crash_dir" ] || continue
             for crash_file in "$crash_dir"/*; do
               [ -f "$crash_file" ] || continue
@@ -203,16 +255,17 @@ jobs:
                 README.txt) continue ;;
               esac
               cname="$(basename "$crash_file" | tr ':,' '__')"
-              result_file="results/fuzz/${bname}_${cname}.txt"
-              set +e
-              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
-                timeout 30 "$BINDIR/MP4Box" $pre "$crash_file" $post \
-                > /dev/null 2> "$result_file"
-              replay_exit=$?
-              set -e
-              if [ "$replay_exit" -ne 0 ] && [ "$replay_exit" -ne 124 ]; then
-                echo "  [!] NEW CRASH: $bname $cname (exit=$replay_exit)"
-                cp "$crash_file" "results/fuzz/${bname}_${cname}.bin"
+              result_file="results/fuzz/${label}_${cname}.txt"
+              run_args=()
+              for a in $args; do
+                if [ "$a" = "@@" ]; then run_args+=("$crash_file"); else run_args+=("$a"); fi
+              done
+              rc=0
+              timeout 30 "$BINDIR/$bin" "${run_args[@]}" \
+                > /dev/null 2> "$result_file" || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] NEW CRASH: $label $cname (exit=$rc)"
+                cp "$crash_file" "results/fuzz/${label}_${cname}.bin"
                 new_crashes=$((new_crashes + 1))
               else
                 rm -f "$result_file"
@@ -221,7 +274,20 @@ jobs:
           done
           echo "[+] Triage complete: $new_crashes crashing inputs"
 
+      - name: Sanitize result filenames
+        if: always()
+        run: |
+          # AFL emits files/dirs like `id:000000,time:...,op:havoc` — the ':'
+          # characters break actions/upload-artifact@v4. Rename depth-first so
+          # directories are renamed only after their contents.
+          set +e
+          find results -depth -name '*:*' -print0 2>/dev/null | while IFS= read -r -d '' p; do
+            mv "$p" "${p//:/_}" 2>/dev/null || true
+          done
+          echo "[+] Filename sanitization complete"
+
       - name: Generate report
+        if: always()
         run: python3 scripts/report.py results/ "$PROJECT"
 
       - name: Upload full results

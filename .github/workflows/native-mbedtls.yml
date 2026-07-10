@@ -19,7 +19,7 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
@@ -29,99 +29,224 @@ jobs:
 
       - name: Validate seeds
         run: |
-          seed_count=$(find seeds/${PROJECT}/ -name "*.bin" -type f 2>/dev/null | wc -l)
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
           echo "[+] Seeds available: $seed_count"
-          ls -la seeds/${PROJECT}/ 2>/dev/null | head -20 || true
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
 
       - name: Install AFL++ and dependencies
         run: bash scripts/setup_aflpp.sh
 
-      - name: Clone latest upstream mbedtls and build with AFL++ + ASan
+      - name: Install extra build dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get install -y -qq perl python3 2>/dev/null || true
+
+      - name: Clone and build latest mbedtls with AFL++ + ASan
         run: |
           set -e
-          git clone --depth 1 --recursive https://github.com/Mbed-TLS/mbedtls.git /tmp/src/mbedtls
-          cd /tmp/src/mbedtls
-          # programs/fuzz/README.md: fuzz targets need the alt time platform to build standalone
+          mkdir -p /tmp/src
+
+          # Clone with submodules, wrapped in a 3x retry.
+          SRC=/tmp/src/mbedtls
+          rm -rf "$SRC"
+          n=0
+          until [ "$n" -ge 3 ]; do
+            if git clone --depth 1 --recurse-submodules \
+                https://github.com/Mbed-TLS/mbedtls.git "$SRC"; then
+              break
+            fi
+            n=$((n + 1))
+            echo "[!] clone failed, retry $n/3"
+            rm -rf "$SRC"
+            sleep 5
+          done
+          [ -d "$SRC" ] || { echo "[!] clone failed after 3 attempts"; exit 1; }
+          cd "$SRC"
+          git submodule update --init --recursive || true
+
+          # programs/fuzz/README.md: fuzz targets need the alt time platform to
+          # build as standalone argv[1]-file reproducers.
           perl scripts/config.py set MBEDTLS_PLATFORM_TIME_ALT
-          mkdir -p build && cd build
+
           export AFL_USE_ASAN=1
+
+          # Build OUT-OF-SOURCE (build dir outside the source tree).
+          BUILD_DIR=/tmp/mbedtls-build
+          rm -rf "$BUILD_DIR"
+          mkdir -p "$BUILD_DIR"
           CC=afl-cc CXX=afl-c++ cmake \
+            -S "$SRC" -B "$BUILD_DIR" \
             -DCMAKE_BUILD_TYPE= \
             -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
             -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
             -DENABLE_TESTING=Off \
-            ..
-          make -j"$(nproc)"
-          # Standalone CLI reproducer: reads argv[1] as the input file.
-          BINDIR="/tmp/src/mbedtls/build/programs"
-          TARGET_BIN="$BINDIR/fuzz/fuzz_x509crl"
-          if [ ! -x "$TARGET_BIN" ]; then
-            echo "[!] Expected target not built: $TARGET_BIN"
-            find "$BINDIR" -type f -executable 2>/dev/null | head -40
+            -DBUILD_TESTING=OFF \
+            -DENABLE_PROGRAMS=On
+          cmake --build "$BUILD_DIR" -j"$(nproc)"
+
+          # The standalone fuzz_* reproducers land here; each reads argv[1] as
+          # the input file.
+          BINDIR="$BUILD_DIR/programs/fuzz"
+          if [ ! -d "$BINDIR" ]; then
+            echo "[!] Fuzz bindir not found: $BINDIR"
+            find "$BUILD_DIR" -type f -executable 2>/dev/null | head -60
             exit 1
           fi
-          echo "[+] Built target: $TARGET_BIN"
+          if [ ! -x "$BINDIR/fuzz_x509crl" ]; then
+            echo "[!] Expected target not built: $BINDIR/fuzz_x509crl"
+            find "$BINDIR" -type f -executable 2>/dev/null | head -60
+            exit 1
+          fi
           echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
-          echo "TARGET_BIN=$TARGET_BIN" >> "$GITHUB_ENV"
+          echo "[+] Built fuzz reproducers in $BINDIR:"
+          find "$BINDIR" -maxdepth 1 -type f -executable -printf '%f\n' 2>/dev/null | sort
 
       - name: Dry-run replay (lost-bug check)
         run: |
+          set +e
           mkdir -p results/dry_run
-          bname="$(basename "$TARGET_BIN")"
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+
+          # Enumerate every standalone fuzz_* reproducer. They all consume the
+          # PoC as a single file argument (@@).
+          mapfile -t TOOLS < <(find "$BINDIR" -maxdepth 1 -type f -executable -printf '%f\n' 2>/dev/null | sort)
+          echo "[+] Replay tools: ${TOOLS[*]}"
+
           crash_count=0
           total=0
-          for seed in seeds/${PROJECT}/*.bin; do
+          for seed in "seeds/$PROJECT"/*.bin; do
             [ -f "$seed" ] || continue
-            sname="$(basename "$seed" .bin)"
-            result_file="results/dry_run/${bname}_${sname}.txt"
-            total=$((total + 1))
-            echo "[*] Replaying $bname with $sname..."
-            set +e
-            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
-              timeout 30 "$TARGET_BIN" "$seed" > /dev/null 2> results/dry_run/.stderr_tmp
-            exit_code=$?
-            set -e
-            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
-              echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
-              mv results/dry_run/.stderr_tmp "$result_file"
-              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
-              crash_count=$((crash_count + 1))
-            else
-              rm -f results/dry_run/.stderr_tmp
-            fi
+            sname=$(basename "$seed" .bin)
+            for tool in "${TOOLS[@]}"; do
+              bin="$BINDIR/$tool"
+              [ -x "$bin" ] || continue
+              total=$((total + 1))
+              echo "[*] Replaying $tool with $sname..."
+              rc=0
+              timeout 60 "$bin" "$seed" > /dev/null 2> results/dry_run/.stderr_tmp || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] CRASH: $tool with $sname (exit=$rc)"
+                mv results/dry_run/.stderr_tmp "results/dry_run/${tool}_${sname}.txt"
+                cp "$seed" "results/dry_run/${tool}_${sname}.bin"
+                crash_count=$((crash_count + 1))
+              else
+                rm -f results/dry_run/.stderr_tmp
+              fi
+            done
           done
-          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
 
-      - name: Fuzz with AFL++
+      - name: Fuzz with AFL++ (multi-target)
         run: |
+          set +e
           mkdir -p results/afl
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
-          afl-fuzz -i seeds/${PROJECT} -o results/afl -V "$FUZZ_DURATION" \
-            -- "$TARGET_BIN" @@ || true
+          export AFL_NO_UI=1
+
+          # Build the target list: every standalone fuzz_* reproducer, each
+          # taking the input as a file argument (@@).
+          TOOLS=()
+          while IFS= read -r t; do
+            TOOLS+=("$t")
+          done < <(find "$BINDIR" -maxdepth 1 -type f -executable -printf '%f\n' 2>/dev/null | sort)
+
+          TARGETS=()
+          for t in "${TOOLS[@]}"; do
+            TARGETS+=("$t @@")
+          done
+          n=${#TARGETS[@]}
+          if [ "$n" -eq 0 ]; then
+            echo "[!] No fuzz targets found in $BINDIR"
+            exit 0
+          fi
+
+          # Split total budget across targets, minimum 60s each.
+          per=$(( FUZZ_DURATION / n ))
+          [ "$per" -lt 60 ] && per=60
+          echo "[+] Fuzzing $n target(s) for ${per}s each"
+
+          probe_seed="$(find "seeds/$PROJECT" -name '*.bin' -type f | head -1)"
+
+          for entry in "${TARGETS[@]}"; do
+            tool="${entry%% *}"
+            args="${entry#* }"
+            bin="$BINDIR/$tool"
+            [ -x "$bin" ] || continue
+
+            # Skip tools that fail afl-showmap startup (broken target). Probe
+            # with a real seed by substituting @@ with a concrete file path.
+            # A *target crash* is fine (the target ran) — only a hard
+            # afl-showmap startup abort disqualifies the tool.
+            if [ -n "$probe_seed" ]; then
+              probe_args="${args//@@/$probe_seed}"
+              # shellcheck disable=SC2086
+              AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+                timeout 60 afl-showmap -m none -o /dev/null \
+                -- "$bin" $probe_args > /dev/null 2> results/afl/.showmap_err || true
+              if grep -qiE 'PROGRAM ABORT|Unable to execute|No instrumentation' \
+                    results/afl/.showmap_err 2>/dev/null; then
+                echo "[!] Skipping $tool — afl-showmap startup failed"
+                cat results/afl/.showmap_err
+                rm -f results/afl/.showmap_err
+                continue
+              fi
+              rm -f results/afl/.showmap_err
+            fi
+
+            echo "[*] Fuzzing $tool for ${per}s..."
+            # shellcheck disable=SC2086
+            afl-fuzz \
+              -i "seeds/$PROJECT" \
+              -o "results/afl/$tool" \
+              -m none \
+              -V "$per" \
+              -- "$bin" $args || true
+          done
+          echo "[+] Fuzzing step finished"
 
       - name: Triage AFL++ crashes
         run: |
+          set +e
           mkdir -p results/fuzz
-          bname="$(basename "$TARGET_BIN")"
-          crash_dir="results/afl/default/crashes"
-          if [ ! -d "$crash_dir" ]; then
-            echo "[+] No crashes directory ($crash_dir) — nothing to triage"
-            exit 0
-          fi
-          for crash in "$crash_dir"/*; do
-            [ -f "$crash" ] || continue
-            cname="$(basename "$crash")"
-            [ "$cname" = "README.txt" ] && continue
-            result_file="results/fuzz/${bname}_${cname}.txt"
-            echo "[*] Triaging $cname..."
-            set +e
-            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
-              timeout 30 "$TARGET_BIN" "$crash" > /dev/null 2> "$result_file"
-            set -e
-            cp "$crash" "results/fuzz/${bname}_${cname}.bin"
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          shopt -s nullglob
+
+          triaged=0
+          for tool_dir in results/afl/*; do
+            [ -d "$tool_dir" ] || continue
+            tool=$(basename "$tool_dir")
+            bin="$BINDIR/$tool"
+            [ -x "$bin" ] || continue
+            crash_dir="$tool_dir/default/crashes"
+            [ -d "$crash_dir" ] || continue
+            for crash in "$crash_dir"/*; do
+              [ -f "$crash" ] || continue
+              cname=$(basename "$crash")
+              [ "$cname" = "README.txt" ] && continue
+              result_file="results/fuzz/${tool}_${cname}.txt"
+              echo "[*] Triaging $tool / $cname..."
+              rc=0
+              timeout 60 "$bin" "$crash" > /dev/null 2> "$result_file" || rc=$?
+              cp "$crash" "results/fuzz/${tool}_${cname}.bin"
+              triaged=$((triaged + 1))
+            done
           done
+          echo "[+] Triage complete: $triaged crash input(s) reproduced"
+
+      - name: Sanitize result filenames
+        if: always()
+        run: |
+          # AFL crash files (id:000000,time:...) contain ':' which breaks
+          # actions/upload-artifact@v4. Rename any offending path under results/.
+          if [ -d results ]; then
+            find results -depth -name '*:*' | while IFS= read -r path; do
+              newpath=$(echo "$path" | tr ':' '_')
+              [ "$path" != "$newpath" ] && mv "$path" "$newpath"
+            done
+          fi
+          echo "[+] Filename sanitization complete"
 
       - name: Generate report
         run: python3 scripts/report.py results/ "$PROJECT"

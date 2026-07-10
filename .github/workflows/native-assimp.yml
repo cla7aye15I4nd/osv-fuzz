@@ -19,13 +19,19 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
 
       - name: Download native seeds from R2
         run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
 
       - name: Install AFL++ and dependencies
         run: bash scripts/setup_aflpp.sh
@@ -36,8 +42,23 @@ jobs:
 
       - name: Clone latest upstream source
         run: |
+          set -eux
           mkdir -p /tmp/src
-          git clone --depth 1 --recursive https://github.com/assimp/assimp.git /tmp/src/assimp
+          rm -rf /tmp/src/assimp
+          # Wrap clone (with submodules) in a 3x retry.
+          n=0
+          until [ "$n" -ge 3 ]; do
+            if git clone --depth 1 --recurse-submodules \
+                https://github.com/assimp/assimp.git /tmp/src/assimp; then
+              break
+            fi
+            n=$((n + 1))
+            echo "[!] clone attempt $n failed; retrying..."
+            rm -rf /tmp/src/assimp
+            sleep 5
+          done
+          [ -d /tmp/src/assimp ] || { echo "[!] clone failed"; exit 1; }
+          git -C /tmp/src/assimp submodule update --init --recursive || true
 
       - name: Build assimp + fuzzer harness with AFL++ and ASan
         run: |
@@ -48,107 +69,203 @@ jobs:
           export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
           export CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
 
-          cd /tmp/src/assimp
-          mkdir -p build && cd build
-          cmake .. -G Ninja \
+          SRC=/tmp/src/assimp
+          # Build OUT-OF-SOURCE: the build dir lives OUTSIDE the source tree.
+          BUILD=/tmp/assimp-build
+          rm -rf "$BUILD"
+          mkdir -p "$BUILD"
+
+          cmake -S "$SRC" -B "$BUILD" -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_COMPILER=afl-cc -DCMAKE_CXX_COMPILER=afl-c++ \
             -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+            -DBUILD_TESTING=OFF \
             -DASSIMP_BUILD_ZLIB=ON \
             -DASSIMP_BUILD_TESTS=OFF \
             -DASSIMP_BUILD_ASSIMP_TOOLS=OFF \
+            -DASSIMP_BUILD_DOCS=OFF \
+            -DASSIMP_INSTALL=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT=ON \
             -DASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT=ON
-          ninja
+          ninja -C "$BUILD"
 
-          # Locate the static zlib archive produced by the build (name/path varies).
-          ZLIB_A=$(find . -name 'libzlibstatic.a' -o -name 'libzlib.a' 2>/dev/null | head -1)
+          # Locate the static assimp + zlib archives (name/path can vary).
+          ASSIMP_A=$(find "$BUILD" -name 'libassimp.a' 2>/dev/null | head -1)
+          ZLIB_A=$(find "$BUILD" \( -name 'libzlibstatic.a' -o -name 'libzlib.a' \) 2>/dev/null | head -1)
+          echo "[+] libassimp: ${ASSIMP_A:-<none>}"
           echo "[+] zlib archive: ${ZLIB_A:-<none, relying on -lz>}"
+          [ -n "$ASSIMP_A" ] || { echo "[!] libassimp.a not found"; exit 1; }
 
-          # Link the generic OSS-Fuzz fuzzer harness against AFL++ + ASan.
-          # afl-c++ provides the AFL persistent/fork-server main, so no libFuzzer is needed.
-          afl-c++ $CXXFLAGS -I../include -I./include \
-            ../fuzz/assimp_fuzzer.cc -o ./assimp_fuzzer \
-            ./lib/libassimp.a ${ZLIB_A:--lz} -lpthread -ldl
+          # Link the generic OSS-Fuzz harness against AFL++ + ASan.
+          # afl-c++ supplies the fork-server main, so no libFuzzer is needed.
+          afl-c++ $CXXFLAGS -I"$SRC/include" -I"$BUILD/include" \
+            "$SRC/fuzz/assimp_fuzzer.cc" -o "$BUILD/assimp_fuzzer" \
+            "$ASSIMP_A" ${ZLIB_A:--lz} -lpthread -ldl
 
-          test -x ./assimp_fuzzer
-          echo "BINDIR=/tmp/src/assimp/build" >> "$GITHUB_ENV"
-          echo "FUZZ_BIN=/tmp/src/assimp/build/assimp_fuzzer" >> "$GITHUB_ENV"
-          echo "[+] Built target: /tmp/src/assimp/build/assimp_fuzzer"
+          test -x "$BUILD/assimp_fuzzer"
+          echo "BINDIR=$BUILD" >> "$GITHUB_ENV"
+          echo "[+] Built CLI tools in $BUILD:"
+          ls -la "$BUILD" | head -40
+
+      - name: Enumerate fuzz targets
+        run: |
+          set -eux
+          # Build the TARGETS list: "tool|arg-template" (use @@ for the input path).
+          # Known file-input CLI tools of this project (from recorded invocations):
+          #   assimp_fuzzer $POC
+          declare -A KNOWN
+          KNOWN["assimp_fuzzer"]="@@"
+
+          : > targets.txt
+
+          # 1) Emit every known tool that actually got built.
+          for tool in "${!KNOWN[@]}"; do
+            if [ -x "$BINDIR/$tool" ]; then
+              echo "${tool}|${KNOWN[$tool]}" >> targets.txt
+              echo "[+] target: $tool ${KNOWN[$tool]}"
+            fi
+          done
+
+          # 2) Enumerate any other executables produced in BINDIR and add file-input
+          #    tools we don't already know about (default template: a single @@).
+          while IFS= read -r bin; do
+            tool=$(basename "$bin")
+            case "$tool" in
+              *.a|*.so|*.so.*|*.o|*.cmake) continue ;;
+            esac
+            [ -n "${KNOWN[$tool]:-}" ] && continue
+            if grep -q "^${tool}|" targets.txt 2>/dev/null; then continue; fi
+            echo "${tool}|@@" >> targets.txt
+            echo "[+] target (discovered): $tool @@"
+          done < <(find "$BINDIR" -maxdepth 1 -type f -executable 2>/dev/null | sort)
+
+          echo "[+] Final target list:"
+          cat targets.txt
+          [ -s targets.txt ] || { echo "[!] No fuzz targets found"; exit 1; }
 
       - name: Dry-run replay (lost-bug check)
         run: |
-          set -u
+          set +e
           mkdir -p results/dry_run
-          bname=$(basename "$FUZZ_BIN")
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
           shopt -s nullglob
           crashes=0
           total=0
-          for seed in seeds/$PROJECT/*.bin; do
-            [ -f "$seed" ] || continue
-            sname=$(basename "$seed" .bin)
-            total=$((total + 1))
-            result_file="results/dry_run/${bname}_${sname}.txt"
-            echo "[*] Replaying $sname through $bname..."
-            set +e
-            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
-              timeout 60 "$FUZZ_BIN" "$seed" > /dev/null 2> "results/dry_run/.stderr_tmp"
-            ec=$?
-            set -e
-            if [ $ec -ne 0 ] && [ $ec -ne 124 ]; then
-              echo "  [!] CRASH replaying $sname (exit=$ec)"
-              mv "results/dry_run/.stderr_tmp" "$result_file"
-              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
-              crashes=$((crashes + 1))
-            else
-              rm -f "results/dry_run/.stderr_tmp"
-            fi
-          done
-          echo "[+] Dry run complete: $crashes crashes out of $total seeds"
+          while IFS='|' read -r tool tmpl; do
+            [ -n "$tool" ] || continue
+            bin="$BINDIR/$tool"
+            [ -x "$bin" ] || continue
+            for seed in "seeds/$PROJECT"/*.bin; do
+              [ -f "$seed" ] || continue
+              sname=$(basename "$seed" .bin)
+              total=$((total + 1))
+              args="${tmpl//@@/$seed}"
+              echo "[*] Replaying $sname through $tool..."
+              rc=0
+              # shellcheck disable=SC2086
+              timeout 60 "$bin" $args > /dev/null 2> results/dry_run/.stderr_tmp || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] CRASH: $tool with $sname (exit=$rc)"
+                mv results/dry_run/.stderr_tmp "results/dry_run/${tool}_${sname}.txt"
+                cp "$seed" "results/dry_run/${tool}_${sname}.bin"
+                crashes=$((crashes + 1))
+              else
+                rm -f results/dry_run/.stderr_tmp
+              fi
+            done
+          done < targets.txt
+          echo "[+] Dry run complete: $crashes crashes out of $total replays"
 
-      - name: Fuzz with AFL++
+      - name: Fuzz with AFL++ (multi-target)
         run: |
-          set -u
+          set +e
           mkdir -p results/afl
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
           export AFL_NO_UI=1
           export AFL_USE_ASAN=1
           export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
-          # assimp_fuzzer takes an input file path -> use AFL's @@ placeholder.
-          afl-fuzz -i "seeds/$PROJECT" -o results/afl -m none \
-            -V "$FUZZ_DURATION" -- "$FUZZ_BIN" @@ || true
+
+          # Sample seed used to smoke-test each target via afl-showmap.
+          SAMPLE=$(find "seeds/$PROJECT" -name '*.bin' -type f | head -1)
+
+          NUM=$(grep -c . targets.txt)
+          [ "$NUM" -ge 1 ] || NUM=1
+          PER=$(( FUZZ_DURATION / NUM ))
+          [ "$PER" -lt 60 ] && PER=60
+          echo "[+] $NUM target(s); ${PER}s each"
+
+          while IFS='|' read -r tool tmpl; do
+            [ -n "$tool" ] || continue
+            bin="$BINDIR/$tool"
+            [ -x "$bin" ] || continue
+
+            # Skip tools that fail afl-showmap startup.
+            if [ -n "$SAMPLE" ]; then
+              smargs="${tmpl//@@/$SAMPLE}"
+              # shellcheck disable=SC2086
+              AFL_QUIET=1 afl-showmap -m none -t 10000 -o /dev/null -- "$bin" $smargs >/dev/null 2>&1
+              sm=$?
+              if [ "$sm" -ne 0 ] && [ "$sm" -ne 1 ] && [ "$sm" -ne 2 ]; then
+                echo "[!] Skipping $tool: afl-showmap startup failed (rc=$sm)"
+                continue
+              fi
+            fi
+
+            echo "[*] Fuzzing $tool for ${PER}s: $bin $tmpl"
+            # shellcheck disable=SC2086
+            afl-fuzz -i "seeds/$PROJECT" -o "results/afl/$tool" -m none \
+              -V "$PER" -- "$bin" $tmpl || true
+          done < targets.txt
           echo "[+] Fuzzing step finished"
 
       - name: Triage AFL crashes under ASan
         run: |
-          set -u
+          set +e
           mkdir -p results/fuzz
-          bname=$(basename "$FUZZ_BIN")
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
           shopt -s nullglob
           new=0
-          for crash in results/afl/default/crashes/*; do
-            [ -f "$crash" ] || continue
-            case "$(basename "$crash")" in
-              README.txt) continue ;;
-            esac
-            cid=$(basename "$crash" | tr ':,' '__')
-            result_file="results/fuzz/${bname}_${cid}.txt"
-            set +e
-            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 \
-              timeout 60 "$FUZZ_BIN" "$crash" > /dev/null 2> "$result_file"
-            ec=$?
-            set -e
-            if [ $ec -ne 0 ] && [ $ec -ne 124 ]; then
-              echo "  [!] NEW CRASH: $cid (exit=$ec)"
-              cp "$crash" "results/fuzz/${bname}_${cid}.bin"
-              new=$((new + 1))
-            else
-              rm -f "$result_file"
-            fi
-          done
+          while IFS='|' read -r tool tmpl; do
+            [ -n "$tool" ] || continue
+            bin="$BINDIR/$tool"
+            [ -x "$bin" ] || continue
+            crash_dir="results/afl/$tool/default/crashes"
+            [ -d "$crash_dir" ] || continue
+            for crash in "$crash_dir"/*; do
+              [ -f "$crash" ] || continue
+              case "$(basename "$crash")" in
+                README.txt) continue ;;
+              esac
+              cid=$(basename "$crash" | tr ':,' '__')
+              result_file="results/fuzz/${tool}_${cid}.txt"
+              args="${tmpl//@@/$crash}"
+              rc=0
+              # shellcheck disable=SC2086
+              timeout 60 "$bin" $args > /dev/null 2> "$result_file" || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] NEW CRASH: $tool ($cid, exit=$rc)"
+                cp "$crash" "results/fuzz/${tool}_${cid}.bin"
+                new=$((new + 1))
+              else
+                rm -f "$result_file"
+              fi
+            done
+          done < targets.txt
           echo "[+] Triage complete: $new reproducible crashes"
+
+      - name: Sanitize result filenames
+        if: always()
+        run: |
+          set +e
+          # AFL crash files contain ':' (id:000000,time:...) which breaks
+          # actions/upload-artifact@v4. Rename any path under results/ with ':'.
+          find results -depth -name '*:*' 2>/dev/null | while read -r p; do
+            newname=$(basename "$p" | tr ':' '_')
+            mv "$p" "$(dirname "$p")/$newname" 2>/dev/null || true
+          done
+          echo "[+] Filename sanitization complete"
 
       - name: Generate report
         if: always()

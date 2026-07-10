@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       fuzz_duration:
-        description: "Fuzzing duration in seconds"
+        description: "Fuzzing duration in seconds (split across targets)"
         default: "1800"
   schedule:
     - cron: "0 13 * * 0"
@@ -19,7 +19,7 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
@@ -29,11 +29,11 @@ jobs:
 
       - name: Validate seeds
         run: |
-          seed_count=$(find seeds/${PROJECT}/ -name "*.bin" -type f 2>/dev/null | wc -l)
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
           echo "[+] Seeds available: $seed_count"
-          ls -la seeds/${PROJECT}/ 2>/dev/null | head -40 || true
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -40 || true
 
-      - name: Install AFL++
+      - name: Install AFL++ and dependencies
         run: bash scripts/setup_aflpp.sh
 
       - name: Build libvips (latest master) with AFL++ + ASan
@@ -44,18 +44,33 @@ jobs:
           # --- libvips build deps (Meson + image codecs) ---
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential pkg-config meson ninja-build \
+            build-essential clang pkg-config meson ninja-build \
             libglib2.0-dev libexpat1-dev \
             libtiff-dev libpng-dev libjpeg-dev libwebp-dev libexif-dev \
-            libheif-dev
+            libheif-dev libgirepository1.0-dev
           # HEIF decoder/encoder plugins are best-effort (universe repo).
           sudo apt-get install -y libheif-plugin-x265 libheif-plugin-libde265 || true
 
-          # --- latest upstream source ---
+          # --- latest upstream source (3x retry, with submodules) ---
           mkdir -p /tmp/src
           rm -rf /tmp/src/libvips
-          git clone --depth 1 https://github.com/libvips/libvips.git /tmp/src/libvips
+          cloned=0
+          for attempt in 1 2 3; do
+            if git clone --depth 1 --recurse-submodules \
+                 https://github.com/libvips/libvips.git /tmp/src/libvips; then
+              cloned=1
+              break
+            fi
+            echo "[!] clone attempt $attempt failed, retrying..."
+            rm -rf /tmp/src/libvips
+            sleep 5
+          done
+          if [ "$cloned" -ne 1 ]; then
+            echo "[!] git clone failed after 3 attempts"
+            exit 1
+          fi
           cd /tmp/src/libvips
+          git submodule update --init --recursive || true
 
           # --- AFL++ instrumentation + AddressSanitizer ---
           export CC=afl-cc
@@ -66,120 +81,209 @@ jobs:
           export CXXFLAGS="$CFLAGS"
           export LDFLAGS="-fsanitize=address"
 
+          # meson feature options take enabled/disabled (NOT true/false);
+          # plain booleans (deprecated/examples) take true/false.
           meson setup build --buildtype=debug \
             -Db_lundef=false \
+            -Dintrospection=disabled \
+            -Ddeprecated=false \
+            -Dexamples=false \
             --prefix "$PWD/install"
           meson compile -C build
 
-          # Built CLI lives in the build tree (rpath points at the built libvips.so).
+          # Built CLI tools live in the build tree (rpath -> built libvips.so).
           BINDIR="/tmp/src/libvips/build/tools"
           if [ ! -x "$BINDIR/vips" ]; then
             echo "[!] vips CLI was not built at $BINDIR/vips"
-            find /tmp/src/libvips/build -name vips -maxdepth 4 -type f 2>/dev/null || true
+            find /tmp/src/libvips/build -maxdepth 4 -name vips -type f 2>/dev/null || true
             exit 1
           fi
           echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
-          echo "[+] Built vips:"
-          ls -la "$BINDIR/vips"
+          echo "[+] Built CLI tools in $BINDIR:"
+          ls -la "$BINDIR" | grep -E 'vips' || true
           "$BINDIR/vips" --version || true
 
       - name: Dry-run replay (lost-bug check)
         run: |
+          # Step starts with set +e so a crashing replay never aborts the step.
+          set +e
           set -u
           mkdir -p results/dry_run
           export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
-          shopt -s nullglob
+
+          # Multi-target table: "label|binary|args" (args use @@ for the input).
+          TARGETS=(
+            "vips_copy_v|vips|copy @@ /tmp/out_copy.v"
+            "vips_copy_heif|vips|copy @@ /tmp/out_copy.heif"
+            "vips_csvload|vips|csvload @@ /tmp/out_csv.v"
+            "vips_matrixload|vips|matrixload @@ /tmp/out_mat.v"
+            "vips_unpremultiply|vips|unpremultiply @@ /tmp/out_unpre.png"
+            "vipsheader|vipsheader|@@"
+            "vipsthumbnail|vipsthumbnail|@@ -o /tmp/out_tn.v"
+          )
 
           crash_count=0
           total=0
-          for seed in seeds/${PROJECT}/*.bin; do
+          for seed in seeds/"$PROJECT"/*.bin; do
             [ -f "$seed" ] || continue
             sname=$(basename "$seed" .bin)
-            POC="$seed"
-            result_file="results/dry_run/vips_${sname}.txt"
-            total=$((total + 1))
-            echo "[*] Replaying $sname ..."
-
-            set +e
-            case "$sname" in
-              *3147*)
-                timeout 60 "$BINDIR/vips" csvload --whitespace='😀' "$POC" /tmp/out.v \
-                  > /dev/null 2> /tmp/dry_err.txt ;;
-              *29769*)
-                timeout 60 "$BINDIR/vips" copy "$POC" /tmp/out.heif \
-                  > /dev/null 2> /tmp/dry_err.txt ;;
-              *3282*)
-                timeout 60 "$BINDIR/vips" unpremultiply "$POC" /tmp/out.png --alpha-band 10 \
-                  > /dev/null 2> /tmp/dry_err.txt ;;
-              *3146*)
-                timeout 60 "$BINDIR/vips" matrixload "$POC" /tmp/out.v \
-                  > /dev/null 2> /tmp/dry_err.txt ;;
-              *3145*)
-                PATH="$BINDIR:$PATH" timeout 60 sh "$POC" \
-                  > /dev/null 2> /tmp/dry_err.txt ;;
-              *3281*)
-                timeout 60 "$BINDIR/vips" bandrank "$POC $POC" /tmp/out.png --index 4 \
-                  > /dev/null 2> /tmp/dry_err.txt ;;
-              *3283*)
-                VIPS="$BINDIR/vips" timeout 60 bash "$POC" \
-                  > /dev/null 2> /tmp/dry_err.txt ;;
-              *3284*)
-                VIPS="$BINDIR/vips" timeout 60 bash "$POC" \
-                  > /dev/null 2> /tmp/dry_err.txt ;;
-              *)
-                # Generic loader-driven fallback for any other seed.
-                timeout 60 "$BINDIR/vips" copy "$POC" /tmp/out.v \
-                  > /dev/null 2> /tmp/dry_err.txt ;;
-            esac
-            code=$?
-            set -e
-
-            if [ $code -ne 0 ] && [ $code -ne 124 ]; then
-              echo "  [!] CRASH: $sname (exit=$code)"
-              cp /tmp/dry_err.txt "$result_file"
-              cp "$seed" "results/dry_run/vips_${sname}.bin"
-              crash_count=$((crash_count + 1))
-            fi
-            rm -f /tmp/dry_err.txt
+            for entry in "${TARGETS[@]}"; do
+              IFS='|' read -r label bin args <<< "$entry"
+              cmd="$BINDIR/$bin"
+              [ -x "$cmd" ] || continue
+              # Substitute @@ with the seed path, keeping other args intact.
+              run_args=()
+              for a in $args; do
+                if [ "$a" = "@@" ]; then run_args+=("$seed"); else run_args+=("$a"); fi
+              done
+              total=$((total + 1))
+              echo "[*] Replaying $label with $sname ..."
+              rc=0
+              timeout 60 "$cmd" "${run_args[@]}" > /dev/null 2> /tmp/dry_err.txt || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] CRASH: $label with $sname (exit=$rc)"
+                cp /tmp/dry_err.txt "results/dry_run/${label}_${sname}.txt"
+                cp "$seed" "results/dry_run/${label}_${sname}.bin"
+                crash_count=$((crash_count + 1))
+              fi
+              rm -f /tmp/dry_err.txt
+            done
           done
           echo "[+] Dry run complete: $crash_count crashes out of $total replays"
 
-      - name: Fuzz with AFL++
+      - name: Fuzz with AFL++ (multi-target)
         run: |
+          set +e
           set -u
           mkdir -p results/afl
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_NO_UI=1
           export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
-          # Drive the generic loader path; @@ is the AFL-mutated input file.
-          afl-fuzz -i seeds/${PROJECT} -o results/afl -m none -V "$FUZZ_DURATION" \
-            -- "$BINDIR/vips" copy @@ /tmp/out.v || true
+
+          TARGETS=(
+            "vips_copy_v|vips|copy @@ /tmp/out_copy.v"
+            "vips_copy_heif|vips|copy @@ /tmp/out_copy.heif"
+            "vips_csvload|vips|csvload @@ /tmp/out_csv.v"
+            "vips_matrixload|vips|matrixload @@ /tmp/out_mat.v"
+            "vips_unpremultiply|vips|unpremultiply @@ /tmp/out_unpre.png"
+            "vipsheader|vipsheader|@@"
+            "vipsthumbnail|vipsthumbnail|@@ -o /tmp/out_tn.v"
+          )
+
+          # A representative seed to preflight each target via afl-showmap.
+          firstseed=""
+          for s in seeds/"$PROJECT"/*.bin; do
+            if [ -s "$s" ]; then firstseed="$s"; break; fi
+          done
+          [ -n "$firstseed" ] || firstseed=$(ls seeds/"$PROJECT"/*.bin 2>/dev/null | head -1)
+
+          # Preflight: keep only targets that produce coverage under afl-showmap.
+          ACTIVE=()
+          for entry in "${TARGETS[@]}"; do
+            IFS='|' read -r label bin args <<< "$entry"
+            cmd="$BINDIR/$bin"
+            [ -x "$cmd" ] || { echo "[-] skip $label (missing $cmd)"; continue; }
+            sm_args="${args//@@/$firstseed}"
+            AFL_MAP_SIZE=0 afl-showmap -o "/tmp/sm_${label}" -m none -t 10000 \
+              -- "$cmd" $sm_args > /dev/null 2>&1
+            if [ -s "/tmp/sm_${label}" ]; then
+              ACTIVE+=("$entry")
+              echo "[+] target active: $label"
+            else
+              echo "[-] skip $label (afl-showmap produced no coverage)"
+            fi
+          done
+
+          n_active="${#ACTIVE[@]}"
+          if [ "$n_active" -eq 0 ]; then
+            echo "[!] No fuzzable targets survived afl-showmap preflight"
+            exit 0
+          fi
+
+          # Split the total budget across active targets (min 60s each).
+          per=$(( FUZZ_DURATION / n_active ))
+          [ "$per" -lt 60 ] && per=60
+          echo "[+] $n_active active targets, ${per}s each"
+
+          for entry in "${ACTIVE[@]}"; do
+            IFS='|' read -r label bin args <<< "$entry"
+            cmd="$BINDIR/$bin"
+            echo "[*] Fuzzing $label for ${per}s: $cmd $args"
+            afl-fuzz -i seeds/"$PROJECT" -o "results/afl/$label" \
+              -m none -V "$per" \
+              -- "$cmd" $args || true
+          done
           echo "[+] Fuzzing step finished"
 
       - name: Triage AFL crashes under ASan
         run: |
+          set +e
           set -u
           mkdir -p results/fuzz
           export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
           shopt -s nullglob
 
+          TARGETS=(
+            "vips_copy_v|vips|copy @@ /tmp/out_copy.v"
+            "vips_copy_heif|vips|copy @@ /tmp/out_copy.heif"
+            "vips_csvload|vips|csvload @@ /tmp/out_csv.v"
+            "vips_matrixload|vips|matrixload @@ /tmp/out_mat.v"
+            "vips_unpremultiply|vips|unpremultiply @@ /tmp/out_unpre.png"
+            "vipsheader|vipsheader|@@"
+            "vipsthumbnail|vipsthumbnail|@@ -o /tmp/out_tn.v"
+          )
+
+          # Map label -> "bin|args" for replaying that target's crashes.
+          declare -A T_BIN T_ARGS
+          for entry in "${TARGETS[@]}"; do
+            IFS='|' read -r label bin args <<< "$entry"
+            T_BIN["$label"]="$bin"
+            T_ARGS["$label"]="$args"
+          done
+
           n=0
-          for crash in results/afl/default/crashes/*; do
-            [ -f "$crash" ] || continue
-            cname=$(basename "$crash")
-            [ "$cname" = "README.txt" ] && continue
-            result_file="results/fuzz/vips_${cname}.txt"
-            echo "[*] Triaging $cname ..."
-            set +e
-            timeout 60 "$BINDIR/vips" copy "$crash" /tmp/out.v \
-              > /dev/null 2> "$result_file"
-            set -e
-            cp "$crash" "results/fuzz/vips_${cname}.bin"
-            n=$((n + 1))
+          for crash_dir in results/afl/*/default/crashes; do
+            [ -d "$crash_dir" ] || continue
+            label=$(basename "$(dirname "$(dirname "$crash_dir")")")
+            bin="${T_BIN[$label]:-}"
+            args="${T_ARGS[$label]:-}"
+            [ -n "$bin" ] || continue
+            cmd="$BINDIR/$bin"
+            [ -x "$cmd" ] || continue
+            for crash in "$crash_dir"/*; do
+              [ -f "$crash" ] || continue
+              cname=$(basename "$crash")
+              [ "$cname" = "README.txt" ] && continue
+              run_args=()
+              for a in $args; do
+                if [ "$a" = "@@" ]; then run_args+=("$crash"); else run_args+=("$a"); fi
+              done
+              result_file="results/fuzz/${label}_${cname}.txt"
+              echo "[*] Triaging $label / $cname ..."
+              timeout 60 "$cmd" "${run_args[@]}" > /dev/null 2> "$result_file" || true
+              cp "$crash" "results/fuzz/${label}_${cname}.bin"
+              n=$((n + 1))
+            done
           done
           echo "[+] Triaged $n crashing inputs"
 
+      - name: Sanitize result filenames for upload
+        if: always()
+        run: |
+          # actions/upload-artifact@v4 rejects paths containing ':' (AFL uses
+          # id:000000,time:... in crash filenames). Rename ':' -> '_'.
+          set -u
+          [ -d results ] || exit 0
+          find results -depth -name '*:*' | while read -r p; do
+            d=$(dirname "$p")
+            b=$(basename "$p")
+            mv "$p" "$d/${b//:/_}"
+          done
+          echo "[+] Filename sanitize complete"
+
       - name: Generate report
+        if: always()
         run: python3 scripts/report.py results/ "$PROJECT"
 
       - name: Upload PoC artifacts

@@ -19,7 +19,7 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
@@ -53,24 +53,46 @@ jobs:
           PREFIX="$BUILD/install"           # install prefix
           BINDIR="$PREFIX/bin"              # built programs live here
 
-          # extra runtime deps for image codecs used by libgd
-          sudo apt-get install -y -qq zlib1g-dev libpng-dev 2>/dev/null || true
+          # --- Codec/runtime deps libgd's CLI tools need to link ---
+          sudo apt-get install -y -qq \
+            zlib1g-dev libpng-dev libjpeg-dev libfreetype6-dev \
+            libwebp-dev libtiff-dev libxpm-dev libfontconfig1-dev \
+            autoconf automake libtool pkg-config 2>/dev/null || true
 
-          # --- Get LATEST source (shallow; no full history) ---
+          # --- Get LATEST source (shallow), with a 3x clone retry ---
           rm -rf "$BUILD"
-          git clone --depth 1 https://github.com/libgd/libgd "$BUILD"
+          n=0
+          until [ "$n" -ge 3 ]; do
+            if git clone --depth 1 --recurse-submodules \
+                 https://github.com/libgd/libgd "$BUILD"; then
+              break
+            fi
+            n=$((n + 1))
+            echo "[!] clone failed (attempt $n) — retrying..."
+            rm -rf "$BUILD"
+            sleep 5
+          done
+          [ -d "$BUILD" ] || { echo "[!] git clone failed after 3 attempts"; exit 1; }
           cd "$BUILD"
+          git submodule update --init --recursive || true
 
-          # --- Autotools build (same path oss-fuzz uses) ---
-          ./bootstrap.sh
-          # libgd's configure auto-adds -Werror for git checkouts with a GCC-
-          # like compiler (configure.ac), turning any warning from tip-of-tree
-          # master or the afl-cc/ASan toolchain into a hard build error.
-          # Disable it so the latest source always builds.
+          # --- Autotools build. libgd is a git checkout with no ./configure,
+          # so bootstrap it first (bootstrap.sh, else autoreconf -fi). Its
+          # configure.ac force-adds -Werror for GCC-like compilers on a git
+          # tree, turning any afl-cc/ASan warning into a hard failure, so pass
+          # --disable-werror. ---
+          if [ ! -x ./configure ]; then
+            if [ -x ./bootstrap.sh ]; then
+              ./bootstrap.sh
+            else
+              autoreconf -fi
+            fi
+          fi
           ./configure --prefix="$PREFIX" --disable-shared --disable-werror
           make -j"$(nproc)"
           make install
-          # Shipped CLI tools now in $BINDIR: gd2togif gd2topng gdtopng ...
+          # Shipped CLI tools now in $BINDIR: gd2togif gd2topng gdtopng
+          # pngtogd pngtogd2 giftogd2 webpng gdcmpgif gdparttopng gd2copypal ...
 
           # --- Extra harness: libgd ships NO command-line TGA reader ---
           cat > "$BUILD/gd_read_tga.c" <<'EOF'
@@ -89,101 +111,160 @@ jobs:
           $CC $CFLAGS -I"$PREFIX/include" "$BUILD/gd_read_tga.c" \
               -o "$BINDIR/gd_read_tga" -L"$PREFIX/lib" -lgd -lz -lm
 
-          echo "[+] Built binaries:"
+          echo "[+] Built binaries in $BINDIR:"
           ls -la "$BINDIR"
           test -x "$BINDIR/gd_read_tga"
-          test -x "$BINDIR/gd2togif"
 
-          # Record paths for later steps
+          # Record BINDIR for later steps
           echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
-          echo "TGA_BIN=$BINDIR/gd_read_tga" >> "$GITHUB_ENV"
-          echo "GD2_BIN=$BINDIR/gd2togif" >> "$GITHUB_ENV"
+
+      - name: Enumerate fuzzable targets
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          : > results/targets.txt
+
+          # Candidate file-input CLI tools -> argument template (@@ = input).
+          # Only the FIRST file arg is the fuzzed input; other args are fixed
+          # output sinks / mode flags. Tools not built or that fail an
+          # afl-showmap smoke test are skipped.
+          declare -A TOOL_ARGS
+          TOOL_ARGS[gd_read_tga]="@@"
+          TOOL_ARGS[gd2togif]="@@ /dev/null"
+          TOOL_ARGS[gd2topng]="@@ /dev/null"
+          TOOL_ARGS[gdtopng]="@@ /dev/null"
+          TOOL_ARGS[pngtogd]="@@ /dev/null"
+          TOOL_ARGS[pngtogd2]="@@ /dev/null 0 1"
+          TOOL_ARGS[giftogd2]="@@ /dev/null 0 1"
+          TOOL_ARGS[webpng]="@@"
+          TOOL_ARGS[gdparttopng]="@@ /dev/null 0 0 8 8"
+
+          # Pick one seed for the smoke test.
+          seed=""
+          for s in "seeds/$PROJECT"/*.bin; do
+            [ -f "$s" ] && { seed="$s"; break; }
+          done
+
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export ASAN_OPTIONS="abort_on_error=1:detect_leaks=0:symbolize=0"
+
+          for tool in "${!TOOL_ARGS[@]}"; do
+            bin="$BINDIR/$tool"
+            [ -x "$bin" ] || { echo "[-] $tool: not built, skip"; continue; }
+            tmpl="${TOOL_ARGS[$tool]}"
+
+            keep=1
+            if [ -n "$seed" ]; then
+              # afl-showmap startup check: build the arg list, substitute the
+              # seed for @@, and require a non-empty coverage map.
+              args=()
+              for a in $tmpl; do
+                if [ "$a" = "@@" ]; then args+=("$seed"); else args+=("$a"); fi
+              done
+              rc=0
+              afl-showmap -o results/.smoke.map -m none -t 10000 -q \
+                -- "$bin" "${args[@]}" >/dev/null 2>&1 || rc=$?
+              if [ ! -s results/.smoke.map ]; then
+                echo "[-] $tool: afl-showmap produced no coverage (rc=$rc), skip"
+                keep=0
+              fi
+              rm -f results/.smoke.map
+            fi
+
+            if [ "$keep" -eq 1 ]; then
+              printf '%s\t%s\n' "$tool" "$tmpl" >> results/targets.txt
+              echo "[+] target: $tool  ($tmpl)"
+            fi
+          done
+
+          echo "[+] Fuzzable targets:"
+          cat results/targets.txt || true
+          if [ ! -s results/targets.txt ]; then
+            echo "[!] No fuzzable targets discovered"
+            exit 1
+          fi
 
       - name: Dry-run replay (lost-bug check)
         run: |
-          set -uo pipefail
-          # GitHub Actions runs every `run:` block with an implicit `bash -e`
-          # (errexit). This replay step is *designed* to run targets that exit
-          # nonzero (a crashing/erroring seed is exactly the "lost bug" we look
-          # for), so errexit must be OFF here -- otherwise the first nonzero
-          # exit aborts the whole step before `rc=$?` is captured. Turn it off
-          # explicitly so the loop can record crashes and keep going.
+          # GitHub Actions runs each step under `bash -e`. This replay is
+          # DESIGNED to run targets that exit nonzero (a crashing seed is the
+          # lost bug we hunt), so capture exit codes per-invocation with
+          # `rc=0; ... || rc=$?` rather than toggling global errexit.
           set +e
           mkdir -p results/dry_run
           export ASAN_OPTIONS="abort_on_error=1:detect_leaks=0"
 
-          # Each libgd target is a plain file-input CLI. The seed replaces $POC.
-          #   gd_read_tga  <in>
-          #   gd2togif     <in> /dev/null
-          # Seeds are a mixed pool (some TGA, some GD2); replay every seed
-          # against every target and keep only the ones that crash.
-          replay_target() {
-            local bname="$1"; shift
-            local bin="$1"; shift
-            # remaining args are the invocation template; the literal token
-            # __POC__ is substituted with the current seed path.
-            for seed in seeds/"$PROJECT"/*.bin; do
+          while IFS=$'\t' read -r tool tmpl; do
+            [ -n "$tool" ] || continue
+            bin="$BINDIR/$tool"
+            [ -x "$bin" ] || continue
+            for seed in "seeds/$PROJECT"/*.bin; do
               [ -f "$seed" ] || continue
               sname=$(basename "$seed" .bin)
               args=()
-              for a in "$@"; do
-                if [ "$a" = "__POC__" ]; then args+=("$seed"); else args+=("$a"); fi
+              for a in $tmpl; do
+                if [ "$a" = "@@" ]; then args+=("$seed"); else args+=("$a"); fi
               done
-              echo "[*] Replaying $bname with $sname..."
+              echo "[*] Replaying $tool with $sname..."
               rc=0
-              "$bin" "${args[@]}" > /dev/null 2> results/dry_run/.stderr_tmp || rc=$?
+              timeout 60 "$bin" "${args[@]}" >/dev/null 2> results/dry_run/.stderr_tmp || rc=$?
               if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
-                echo "  [!] CRASH: $bname / $sname (exit=$rc)"
-                mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
-                cp "$seed" "results/dry_run/${bname}_${sname}.bin"
+                echo "  [!] CRASH: $tool / $sname (exit=$rc)"
+                mv results/dry_run/.stderr_tmp "results/dry_run/${tool}_${sname}.txt"
+                cp "$seed" "results/dry_run/${tool}_${sname}.bin"
               else
                 rm -f results/dry_run/.stderr_tmp
               fi
             done
-          }
-
-          replay_target gd_read_tga "$TGA_BIN" __POC__
-          replay_target gd2togif    "$GD2_BIN" __POC__ /dev/null
+          done < results/targets.txt
 
           echo "[+] Dry-run reports:"
           ls -la results/dry_run/ 2>/dev/null || true
 
-      - name: Fuzz with AFL++
+      - name: Fuzz with AFL++ (multi-target)
         run: |
           set -uo pipefail
           mkdir -p results/afl
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
-          export AFL_USE_ASAN=1
+          export AFL_NO_UI=1
           export ASAN_OPTIONS="abort_on_error=1:detect_leaks=0:symbolize=0"
 
-          # Split the budget across the two file-input targets.
-          HALF=$(( FUZZ_DURATION / 2 ))
-          [ "$HALF" -lt 30 ] && HALF="$FUZZ_DURATION"
+          # Split the budget evenly across all discovered targets (min 60s each).
+          ntargets=$(grep -c . results/targets.txt || echo 1)
+          [ "$ntargets" -ge 1 ] || ntargets=1
+          per=$(( FUZZ_DURATION / ntargets ))
+          [ "$per" -lt 60 ] && per=60
+          echo "[*] $ntargets target(s), ${per}s each"
 
-          echo "[*] Fuzzing gd_read_tga for ${HALF}s ..."
-          afl-fuzz -i "seeds/$PROJECT" -o results/afl/tga -m none -V "$HALF" \
-            -- "$TGA_BIN" @@ || true
+          while IFS=$'\t' read -r tool tmpl; do
+            [ -n "$tool" ] || continue
+            bin="$BINDIR/$tool"
+            [ -x "$bin" ] || continue
+            echo "[*] Fuzzing $tool for ${per}s ($tool $tmpl) ..."
+            # $tmpl is intentionally unquoted so @@ and fixed args word-split;
+            # afl-fuzz substitutes @@ with each input.
+            # shellcheck disable=SC2086
+            afl-fuzz -i "seeds/$PROJECT" -o "results/afl/$tool" -m none -V "$per" \
+              -- "$bin" $tmpl || true
+          done < results/targets.txt
 
-          echo "[*] Fuzzing gd2togif for ${HALF}s ..."
-          afl-fuzz -i "seeds/$PROJECT" -o results/afl/gd2 -m none -V "$HALF" \
-            -- "$GD2_BIN" @@ /dev/null || true
-
-          echo "[+] AFL output:"
+          echo "[+] AFL output tree:"
           find results/afl -maxdepth 3 -type d 2>/dev/null || true
 
       - name: Triage crashes
         run: |
-          set -uo pipefail
+          set +e
           mkdir -p results/fuzz
           export ASAN_OPTIONS="abort_on_error=1:detect_leaks=0"
 
-          triage() {
-            local bname="$1"; shift
-            local crash_dir="$1"; shift
-            local bin="$1"; shift
-            # remaining args: invocation template using __POC__
-            [ -d "$crash_dir" ] || return 0
+          while IFS=$'\t' read -r tool tmpl; do
+            [ -n "$tool" ] || continue
+            bin="$BINDIR/$tool"
+            [ -x "$bin" ] || continue
+            crash_dir="results/afl/$tool/default/crashes"
+            [ -d "$crash_dir" ] || continue
             for crash in "$crash_dir"/*; do
               [ -f "$crash" ] || continue
               case "$(basename "$crash")" in
@@ -191,22 +272,34 @@ jobs:
               esac
               cid=$(basename "$crash")
               args=()
-              for a in "$@"; do
-                if [ "$a" = "__POC__" ]; then args+=("$crash"); else args+=("$a"); fi
+              for a in $tmpl; do
+                if [ "$a" = "@@" ]; then args+=("$crash"); else args+=("$a"); fi
               done
-              echo "[*] Triaging $bname / $cid ..."
-              "$bin" "${args[@]}" > /dev/null 2> "results/fuzz/${bname}_${cid}.txt" || true
-              cp "$crash" "results/fuzz/${bname}_${cid}.bin"
+              echo "[*] Triaging $tool / $cid ..."
+              timeout 60 "$bin" "${args[@]}" >/dev/null 2> "results/fuzz/${tool}_${cid}.txt" || true
+              cp "$crash" "results/fuzz/${tool}_${cid}.bin"
             done
-          }
-
-          triage gd_read_tga results/afl/tga/default/crashes "$TGA_BIN" __POC__
-          triage gd2togif    results/afl/gd2/default/crashes "$GD2_BIN" __POC__ /dev/null
+          done < results/targets.txt
 
           echo "[+] Triage reports:"
           ls -la results/fuzz/ 2>/dev/null || true
 
+      - name: Sanitize result filenames for upload
+        if: always()
+        run: |
+          set -uo pipefail
+          # AFL crash inputs are named like `id:000000,sig:06,...` — the ':'
+          # characters break actions/upload-artifact@v4. Rename any path under
+          # results/ containing ':' to use '_' instead (depth-first so parent
+          # dirs are renamed after their children).
+          find results -depth -name '*:*' -print 2>/dev/null | while read -r p; do
+            newp="$(dirname "$p")/$(basename "$p" | tr ':' '_')"
+            [ "$p" = "$newp" ] || mv "$p" "$newp"
+          done
+          echo "[+] Filenames sanitized"
+
       - name: Generate report
+        if: always()
         run: python3 scripts/report.py results/ "$PROJECT"
 
       - name: Upload PoC artifacts

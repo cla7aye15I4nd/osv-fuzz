@@ -19,7 +19,7 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
@@ -38,12 +38,34 @@ jobs:
 
       - name: Clone and build latest libplist with AFL++ + ASan
         run: |
-          set -e
-          mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/libimobiledevice/libplist.git /tmp/src/libplist
-          cd /tmp/src/libplist
+          set -euo pipefail
 
-          # AFL++ instrumentation + AddressSanitizer
+          # Extra libplist build deps (autotools stack comes from setup_aflpp.sh).
+          sudo apt-get install -y -qq libxml2-dev 2>/dev/null || true
+
+          # --- robust clone: 3x retry, submodules included ---
+          SRC=/tmp/src/libplist
+          rm -rf "$SRC"
+          mkdir -p /tmp/src
+          cloned=0
+          for attempt in 1 2 3; do
+            if git clone --depth 1 --recurse-submodules \
+                 https://github.com/libimobiledevice/libplist.git "$SRC"; then
+              cloned=1
+              break
+            fi
+            echo "[!] clone attempt $attempt failed; retrying..."
+            rm -rf "$SRC"
+            sleep 5
+          done
+          if [ "$cloned" -ne 1 ]; then
+            echo "[!] Failed to clone libplist after 3 attempts"
+            exit 1
+          fi
+          cd "$SRC"
+          git submodule update --init --recursive || true
+
+          # --- AFL++ instrumentation + AddressSanitizer ---
           export CC=afl-cc
           export CXX=afl-c++
           export AFL_USE_ASAN=1
@@ -51,98 +73,211 @@ jobs:
           export CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
           export LDFLAGS="-fsanitize=address"
 
-          # Keep the project's real build system (autotools). Build a static CLI
-          # so tools/.libs/plistutil is a standalone ELF (no libtool wrapper /
-          # LD_LIBRARY_PATH needed for AFL to exec it directly).
-          ./autogen.sh --without-cython --without-tests --disable-shared --enable-static \
-            || ./autogen.sh --without-cython --without-tests \
-            || ./autogen.sh
+          # Autotools git build: regenerate ./configure if missing, disable
+          # -Werror so new-compiler warnings do not abort the build, and build a
+          # static CLI so tools/.libs/* are standalone ELFs (no libtool wrapper /
+          # LD_LIBRARY_PATH needed for AFL to exec them directly).
+          if [ ! -x ./configure ]; then
+            ./autogen.sh --without-cython --without-tests --disable-shared --enable-static --disable-werror \
+              || ./autogen.sh --without-cython --without-tests --disable-shared --enable-static \
+              || ./autogen.sh --without-cython --without-tests \
+              || ./autogen.sh \
+              || autoreconf -fi
+          fi
+          if [ ! -x ./configure ]; then
+            echo "[!] ./configure was not generated"
+            exit 1
+          fi
+          # autogen.sh usually already runs ./configure, but run it explicitly to
+          # be sure the environment (CC/flags) took effect.
+          ./configure --without-cython --without-tests --disable-shared --enable-static --disable-werror \
+            || ./configure --without-cython --without-tests --disable-shared --enable-static \
+            || ./configure --without-cython --without-tests \
+            || ./configure
           make -j"$(nproc)"
 
-          # Locate the real ELF plistutil binary (prefer .libs, fall back to wrapper dir)
-          BIN=""
-          for cand in tools/.libs/plistutil tools/plistutil; do
-            if [ -f "$cand" ] && file "$cand" | grep -q "ELF"; then
-              BIN="$(pwd)/$cand"
+          # --- locate the directory holding the real ELF CLI tools ---
+          BINDIR=""
+          for d in "$SRC/tools/.libs" "$SRC/tools"; do
+            if [ -d "$d" ] && find "$d" -maxdepth 1 -type f -perm -u+x \
+                 -exec file {} \; 2>/dev/null | grep -q "ELF"; then
+              BINDIR="$d"
               break
             fi
           done
-          if [ -z "$BIN" ]; then
-            echo "[!] Could not locate a built ELF plistutil binary"
-            find . -name plistutil -type f 2>/dev/null || true
+          if [ -z "$BINDIR" ]; then
+            echo "[!] Could not locate built ELF CLI tools"
+            find "$SRC" -name plistutil -type f 2>/dev/null || true
             exit 1
           fi
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+          echo "[+] BINDIR=$BINDIR"
+          ls -la "$BINDIR" || true
+          for b in "$BINDIR"/*; do
+            [ -f "$b" ] || continue
+            file "$b" 2>/dev/null | grep -q ELF && echo "  tool: $(basename "$b")"
+          done
 
-          echo "[+] plistutil binary: $BIN"
-          file "$BIN"
-          echo "BIN=$BIN" >> "$GITHUB_ENV"
-          echo "BINDIR=$(pwd)/tools" >> "$GITHUB_ENV"
+      - name: Enumerate fuzz targets
+        run: |
+          set -euo pipefail
+          # Build a TARGETS list of "<tool>|<arg-template-with-@@>" entries for
+          # every file-input CLI tool. All libplist tools read a plist file via
+          # "-i @@" (matching the recorded `plistutil -i $POC` invocations).
+          : > /tmp/targets.txt
+          KNOWN="plistutil"
+
+          add_target() {
+            local name="$1" tmpl="$2"
+            local bin="$BINDIR/$name"
+            [ -f "$bin" ] || return 0
+            [ -x "$bin" ] || return 0
+            file "$bin" 2>/dev/null | grep -q ELF || return 0
+            case "$name" in *.so|*.so.*|*.a|*.la|*.o) return 0;; esac
+            grep -qx "$name|$tmpl" /tmp/targets.txt && return 0
+            echo "$name|$tmpl" >> /tmp/targets.txt
+            echo "[+] target: $name  args='$tmpl'"
+          }
+
+          # Enumerate every executable ELF discovered in BINDIR.
+          for b in "$BINDIR"/*; do
+            [ -f "$b" ] || continue
+            add_target "$(basename "$b")" "-i @@"
+          done
+          # Ensure the known tool from the recorded invocations is present.
+          for k in $KNOWN; do
+            add_target "$k" "-i @@"
+          done
+
+          if [ ! -s /tmp/targets.txt ]; then
+            echo "[!] No fuzz targets discovered in $BINDIR"
+            exit 1
+          fi
+          echo "[+] Total targets: $(wc -l < /tmp/targets.txt)"
 
       - name: Dry-run replay (lost-bug check)
         run: |
           set +e
           mkdir -p results/dry_run
-          bname=$(basename "$BIN")
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
           crashes=0
           total=0
-          for seed in "seeds/$PROJECT"/*.bin; do
-            [ -f "$seed" ] || continue
-            sname=$(basename "$seed" .bin)
-            total=$((total + 1))
-            echo "[*] Replaying $sname through $bname -i ..."
-            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
-              timeout 30 "$BIN" -i "$seed" > /dev/null 2> results/dry_run/.stderr_tmp
-            code=$?
-            if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
-              echo "  [!] CRASH: $sname (exit=$code)"
-              mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
-              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
-              crashes=$((crashes + 1))
-            else
-              rm -f results/dry_run/.stderr_tmp
-            fi
-          done
-          echo "[+] Dry run complete: $crashes crashes out of $total seeds"
+          while IFS='|' read -r tool tmpl; do
+            [ -n "$tool" ] || continue
+            bin="$BINDIR/$tool"
+            [ -x "$bin" ] || continue
+            for seed in "seeds/$PROJECT"/*.bin; do
+              [ -f "$seed" ] || continue
+              sname=$(basename "$seed" .bin)
+              POC="$seed"
+              # Substitute @@ with the seed path, then split into argv.
+              read -ra argv <<< "${tmpl//@@/$POC}"
+              total=$((total + 1))
+              echo "[*] Replaying $tool with $sname ..."
+              rc=0
+              timeout 60 "$bin" "${argv[@]}" > /dev/null 2> results/dry_run/.stderr_tmp || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] CRASH: $tool with $sname (exit=$rc)"
+                mv results/dry_run/.stderr_tmp "results/dry_run/${tool}_${sname}.txt"
+                cp "$seed" "results/dry_run/${tool}_${sname}.bin"
+                crashes=$((crashes + 1))
+              else
+                rm -f results/dry_run/.stderr_tmp
+              fi
+            done
+          done < /tmp/targets.txt
+          echo "[+] Dry run complete: $crashes crashes out of $total replays"
 
-      - name: Fuzz with AFL++
+      - name: Fuzz with AFL++ (multi-target)
         run: |
+          set +e
           mkdir -p results/afl
-          echo "[+] Fuzzing $BIN for ${FUZZ_DURATION}s..."
-          AFL_SKIP_CPUFREQ=1 \
-          AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
-          AFL_NO_UI=1 \
-            afl-fuzz -i "seeds/$PROJECT" -o results/afl -V "$FUZZ_DURATION" -m none \
-              -- "$BIN" -i @@ \
-            || true
+          export AFL_SKIP_CPUFREQ=1
+          export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_NO_UI=1
 
-      - name: Triage crashes
+          # Pick a seed for the afl-showmap startup probe.
+          probe_seed=""
+          for s in "seeds/$PROJECT"/*.bin; do
+            [ -f "$s" ] && { probe_seed="$s"; break; }
+          done
+
+          # Split the total budget across targets, minimum 60s each.
+          n=$(wc -l < /tmp/targets.txt)
+          [ "$n" -lt 1 ] && n=1
+          per=$((FUZZ_DURATION / n))
+          [ "$per" -lt 60 ] && per=60
+          echo "[+] $n targets, ${per}s each"
+
+          while IFS='|' read -r tool tmpl; do
+            [ -n "$tool" ] || continue
+            bin="$BINDIR/$tool"
+            [ -x "$bin" ] || continue
+            read -ra argv <<< "${tmpl//@@/@@}"
+
+            # Startup probe: skip tools afl-showmap cannot instrument/run.
+            if [ -n "$probe_seed" ]; then
+              read -ra pargv <<< "${tmpl//@@/$probe_seed}"
+              rm -f /tmp/showmap.out
+              timeout 30 afl-showmap -o /tmp/showmap.out -m none -- "$bin" "${pargv[@]}" > /dev/null 2>&1
+              sm=$?
+              if [ ! -s /tmp/showmap.out ] && [ "$sm" -ne 0 ]; then
+                echo "[!] Skipping $tool — afl-showmap startup failed (rc=$sm)"
+                continue
+              fi
+            fi
+
+            echo "[*] Fuzzing $tool for ${per}s: $bin ${argv[*]}"
+            afl-fuzz -i "seeds/$PROJECT" -o "results/afl/$tool" -m none -V "$per" \
+              -- "$bin" "${argv[@]}" || true
+          done < /tmp/targets.txt
+          echo "[+] Fuzzing step finished"
+
+      - name: Triage AFL++ crashes
         run: |
           set +e
           mkdir -p results/fuzz
-          bname=$(basename "$BIN")
-          crash_dir="results/afl/default/crashes"
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
           new=0
-          if [ -d "$crash_dir" ]; then
+          while IFS='|' read -r tool tmpl; do
+            [ -n "$tool" ] || continue
+            bin="$BINDIR/$tool"
+            [ -x "$bin" ] || continue
+            crash_dir="results/afl/$tool/default/crashes"
+            [ -d "$crash_dir" ] || continue
             for crash in "$crash_dir"/*; do
               [ -f "$crash" ] || continue
               cname=$(basename "$crash")
               [ "$cname" = "README.txt" ] && continue
               safe=$(echo "$cname" | tr ':,' '__')
-              report="results/fuzz/${bname}_${safe}.txt"
-              echo "[*] Triaging $cname ..."
-              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
-                timeout 30 "$BIN" -i "$crash" > /dev/null 2> "$report"
-              code=$?
-              if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
-                echo "  [!] NEW CRASH: $cname (exit=$code)"
-                cp "$crash" "results/fuzz/${bname}_${safe}.bin"
+              report="results/fuzz/${tool}_${safe}.txt"
+              read -ra argv <<< "${tmpl//@@/$crash}"
+              echo "[*] Triaging $tool $cname ..."
+              rc=0
+              timeout 60 "$bin" "${argv[@]}" > /dev/null 2> "$report" || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] NEW CRASH: $tool ($cname, exit=$rc)"
+                cp "$crash" "results/fuzz/${tool}_${safe}.bin"
                 new=$((new + 1))
               else
                 rm -f "$report"
               fi
             done
-          fi
+          done < /tmp/targets.txt
           echo "[+] Triage complete: $new reproduced crashes"
+
+      - name: Sanitize result filenames
+        if: always()
+        run: |
+          # AFL crash filenames contain ':' (id:000000,time:...), which
+          # actions/upload-artifact@v4 rejects. Rename any offending path.
+          if [ -d results ]; then
+            find results -depth -name '*:*' | while read -r p; do
+              d=$(dirname "$p")
+              b=$(basename "$p" | tr ':' '_')
+              mv "$p" "$d/$b" 2>/dev/null || true
+            done
+          fi
 
       - name: Generate report
         run: python3 scripts/report.py results/ "$PROJECT"

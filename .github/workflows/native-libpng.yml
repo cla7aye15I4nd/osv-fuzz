@@ -19,7 +19,7 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
@@ -27,98 +27,237 @@ jobs:
       - name: Download native seeds from R2
         run: bash scripts/download_native_seeds.sh "$PROJECT"
 
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
+
       - name: Install AFL++ and dependencies
         run: |
           bash scripts/setup_aflpp.sh
-          sudo apt-get install -y -qq zlib1g-dev
+          sudo apt-get install -y -qq zlib1g-dev libtool autoconf automake pkg-config || true
 
-      - name: Build libpng (latest) with AFL++ + ASan
+      - name: Build libpng CLI tools with AFL++ + ASan
         run: |
           set -euxo pipefail
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/pnggroup/libpng.git /tmp/src/libpng
+          rm -rf /tmp/src/libpng
+          # Robust clone: submodules + 3x retry.
+          n=0
+          until [ "$n" -ge 3 ]; do
+            if git clone --depth 1 --recurse-submodules \
+                https://github.com/pnggroup/libpng.git /tmp/src/libpng; then
+              break
+            fi
+            n=$((n + 1))
+            echo "[!] clone attempt $n failed; retrying..."
+            rm -rf /tmp/src/libpng
+            sleep 5
+          done
+          [ -d /tmp/src/libpng ] || { echo "[!] clone failed"; exit 1; }
           cd /tmp/src/libpng
+          git submodule update --init --recursive || true
+
           export CC=afl-cc
           export CXX=afl-c++
           export AFL_USE_ASAN=1
           export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
           export CXXFLAGS="$CFLAGS"
           export LDFLAGS="-fsanitize=address"
-          # git checkout ships no ./configure; generate it.
-          ./autogen.sh
-          ./configure
+
+          # autotools git checkout ships no ./configure; generate it.
+          if [ ! -x ./configure ]; then
+            if [ -x ./autogen.sh ]; then
+              ./autogen.sh
+            else
+              autoreconf -fi
+            fi
+          fi
+          ./configure --disable-werror --enable-shared=no
           make -j"$(nproc)"
-          # Stock simplified-read-API CLI example, linked against the ASan build.
-          "$CC" $CFLAGS -I. contrib/examples/pngtopng.c .libs/libpng16.a -lz -lm -o pngtopng
+
           export BINDIR="$PWD"
+
+          # Build the file-consuming CLI tools against the ASan static lib.
+          # Each build is best-effort; missing tools are simply skipped later.
+          STATIC_LIB="$BINDIR/.libs/libpng16.a"
+          [ -f "$STATIC_LIB" ] || STATIC_LIB="$(find "$BINDIR" -name 'libpng*.a' | head -1)"
+          echo "[+] static lib: $STATIC_LIB"
+
+          build_tool() { # name source_file
+            local name="$1" src="$2"
+            if [ ! -f "$src" ]; then
+              echo "[-] source missing for $name: $src"
+              return 0
+            fi
+            # shellcheck disable=SC2086
+            if "$CC" $CFLAGS -I. "$src" "$STATIC_LIB" -lz -lm -o "$BINDIR/$name" 2>/dev/null; then
+              echo "[+] built $name"
+            else
+              echo "[-] failed to build $name (skipping)"
+            fi
+          }
+
+          build_tool pngtopng    contrib/examples/pngtopng.c
+          build_tool iccfrompng  contrib/examples/iccfrompng.c
+          build_tool pngfix      contrib/tools/pngfix.c
+          build_tool pngimage    contrib/libtests/pngimage.c
+
           echo "BINDIR=$BINDIR" | tee -a "$GITHUB_ENV"
-          echo "TARGET_BIN=$BINDIR/pngtopng" | tee -a "$GITHUB_ENV"
-          ls -la "$BINDIR/pngtopng"
+          echo "[+] Executables in BINDIR:"
+          ls -la "$BINDIR" | grep -E 'pngtopng|iccfrompng|pngfix|pngimage|pngtest' || true
+
+          # Fail only if nothing at all is usable.
+          if [ ! -x "$BINDIR/pngtopng" ] && [ ! -x "$BINDIR/pngfix" ] \
+             && [ ! -x "$BINDIR/pngimage" ] && [ ! -x "$BINDIR/iccfrompng" ]; then
+            echo "[!] No CLI tools built — build failed"
+            exit 1
+          fi
+
+      - name: Enumerate fuzz targets
+        run: |
+          set -uxo pipefail
+          # Manifest of file-input CLI tools: "<name>\t<argtemplate-with-@@>".
+          # @@ marks where the input file goes (afl-fuzz convention).
+          : > /tmp/targets.tsv
+          add_target() { # name argtemplate
+            if [ -x "$BINDIR/$1" ]; then
+              printf '%s\t%s\n' "$1" "$2" >> /tmp/targets.tsv
+              echo "[+] target: $1  args: $2"
+            else
+              echo "[-] not built, skipping target: $1"
+            fi
+          }
+          add_target pngtopng   "@@ /tmp/out_pngtopng.png"
+          add_target iccfrompng "@@"
+          add_target pngfix     "@@"
+          add_target pngimage   "@@"
+          echo "[+] Total targets: $(wc -l < /tmp/targets.tsv)"
+          if [ ! -s /tmp/targets.tsv ]; then
+            echo "[!] No fuzz targets available"
+            exit 1
+          fi
 
       - name: Dry-run replay (lost-bug check)
         run: |
-          set -uxo pipefail
+          set +e
           mkdir -p results/dry_run
-          bname="pngtopng"
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
           crash_count=0
           total=0
-          for seed in seeds/"$PROJECT"/*.bin; do
-            [ -f "$seed" ] || continue
-            sname=$(basename "$seed" .bin)
-            result_file="results/dry_run/${bname}_${sname}.txt"
-            total=$((total + 1))
-            echo "[*] Replaying $bname with $sname..."
-            set +e
-            POC="$seed"
-            ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
-              timeout 60 "$TARGET_BIN" "$POC" /tmp/out.png > /dev/null 2> results/dry_run/.stderr_tmp
-            exit_code=$?
-            set -e
-            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
-              echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
-              mv results/dry_run/.stderr_tmp "$result_file"
-              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
-              crash_count=$((crash_count + 1))
-            else
-              rm -f results/dry_run/.stderr_tmp
-            fi
-          done
-          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+          while IFS=$'\t' read -r name args; do
+            [ -n "$name" ] || continue
+            bin="$BINDIR/$name"
+            [ -x "$bin" ] || continue
+            for seed in seeds/"$PROJECT"/*.bin; do
+              [ -f "$seed" ] || continue
+              sname=$(basename "$seed" .bin)
+              POC="$seed"
+              cmd_args="${args//@@/$POC}"
+              total=$((total + 1))
+              echo "[*] Replaying $name with $sname..."
+              # shellcheck disable=SC2086
+              timeout 60 "$bin" $cmd_args > /dev/null 2> results/dry_run/.stderr_tmp
+              rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] CRASH: $name with $sname (exit=$rc)"
+                mv results/dry_run/.stderr_tmp "results/dry_run/${name}_${sname}.txt"
+                cp "$seed" "results/dry_run/${name}_${sname}.bin"
+                crash_count=$((crash_count + 1))
+              else
+                rm -f results/dry_run/.stderr_tmp
+              fi
+            done
+          done < /tmp/targets.tsv
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
 
-      - name: Fuzz with AFL++
+      - name: Fuzz with AFL++ (multi-target)
         run: |
           set -uxo pipefail
           mkdir -p results/afl
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
-          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
-          afl-fuzz -i seeds/"$PROJECT" -o results/afl -V "$FUZZ_DURATION" \
-            -- "$TARGET_BIN" @@ /tmp/out.png || true
+          export AFL_NO_UI=1
+
+          ntargets=$(wc -l < /tmp/targets.tsv)
+          [ "$ntargets" -gt 0 ] || ntargets=1
+          per=$(( FUZZ_DURATION / ntargets ))
+          [ "$per" -lt 60 ] && per=60
+          echo "[+] $ntargets targets, ${per}s each"
+
+          sample=$(find "seeds/$PROJECT" -name '*.bin' -type f | head -1)
+
+          while IFS=$'\t' read -r name args; do
+            [ -n "$name" ] || continue
+            bin="$BINDIR/$name"
+            [ -x "$bin" ] || continue
+
+            # Skip tools that fail afl-showmap startup.
+            if [ -n "$sample" ]; then
+              smap_args="${args//@@/$sample}"
+              # shellcheck disable=SC2086
+              if ! afl-showmap -o /dev/null -m none -t 5000 \
+                  -- "$bin" $smap_args >/dev/null 2>&1; then
+                echo "[!] $name failed afl-showmap startup; skipping"
+                continue
+              fi
+            fi
+
+            echo "[*] Fuzzing $name for ${per}s..."
+            # shellcheck disable=SC2086
+            afl-fuzz -i "seeds/$PROJECT" -o "results/afl/$name" \
+              -m none -V "$per" \
+              -- "$bin" $args || true
+          done < /tmp/targets.tsv
+          echo "[+] Fuzzing step finished"
 
       - name: Triage AFL++ crashes
         run: |
-          set -uxo pipefail
+          set +e
           mkdir -p results/fuzz
-          bname="pngtopng"
-          crash_dir="results/afl/default/crashes"
-          if [ -d "$crash_dir" ]; then
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+          new_crashes=0
+          while IFS=$'\t' read -r name args; do
+            [ -n "$name" ] || continue
+            bin="$BINDIR/$name"
+            [ -x "$bin" ] || continue
+            crash_dir="results/afl/$name/default/crashes"
+            [ -d "$crash_dir" ] || continue
             for crash in "$crash_dir"/*; do
               [ -f "$crash" ] || continue
               cname=$(basename "$crash")
               [ "$cname" = "README.txt" ] && continue
-              result_file="results/fuzz/${bname}_${cname}.txt"
-              echo "[*] Triaging $cname..."
-              set +e
-              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
-                timeout 60 "$TARGET_BIN" "$crash" /tmp/out.png > /dev/null 2> "$result_file"
-              set -e
-              cp "$crash" "results/fuzz/${bname}_${cname}.bin"
+              safe=$(echo "$cname" | tr ':,' '__')
+              cmd_args="${args//@@/$crash}"
+              echo "[*] Triaging $name / $cname..."
+              # shellcheck disable=SC2086
+              timeout 60 "$bin" $cmd_args > /dev/null 2> "results/fuzz/${name}_${safe}.txt"
+              rc=$?
+              cp "$crash" "results/fuzz/${name}_${safe}.bin"
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                new_crashes=$((new_crashes + 1))
+              fi
             done
-          else
-            echo "[!] No AFL crash directory found at $crash_dir"
+          done < /tmp/targets.tsv
+          echo "[+] Triage complete: $new_crashes reproduced crashes"
+
+      - name: Sanitize result filenames
+        if: always()
+        run: |
+          set -uxo pipefail
+          # AFL filenames like id:000000,time:... contain ':' which breaks
+          # actions/upload-artifact@v4. Rename any offending path under results/.
+          if [ -d results ]; then
+            find results -depth -name '*:*' | while read -r p; do
+              d=$(dirname "$p")
+              b=$(basename "$p" | tr ':' '_')
+              mv "$p" "$d/$b" 2>/dev/null || true
+            done
           fi
 
       - name: Generate report
+        if: always()
         run: python3 scripts/report.py results/ "$PROJECT"
 
       - name: Upload full results

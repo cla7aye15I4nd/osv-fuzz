@@ -19,7 +19,7 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
@@ -36,35 +36,53 @@ jobs:
       - name: Install AFL++ and dependencies
         run: |
           bash scripts/setup_aflpp.sh
+          # iccDEV build deps (libpng/jpeg/tiff/xml2 + nlohmann-json + ninja).
           sudo apt-get install -y -qq \
             libpng-dev libjpeg-dev libtiff-dev libxml2-dev \
-            nlohmann-json3-dev ninja-build 2>/dev/null || true
+            nlohmann-json3-dev ninja-build python3-pil 2>/dev/null || true
 
       - name: Clone and build latest iccdev with AFL++ + ASan
         run: |
           set -euo pipefail
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/InternationalColorConsortium/iccDEV.git /tmp/src/iccdev
-          cd /tmp/src/iccdev
+          # Retry the clone (with submodules) up to 3x for transient failures.
+          SRC=/tmp/src/iccdev
+          rm -rf "$SRC"
+          ok=0
+          for attempt in 1 2 3; do
+            if git clone --depth 1 --recurse-submodules \
+                 https://github.com/InternationalColorConsortium/iccDEV.git "$SRC"; then
+              ok=1; break
+            fi
+            echo "[!] clone attempt $attempt failed — retrying"; sleep 5; rm -rf "$SRC"
+          done
+          [ "$ok" -eq 1 ] || { echo "[!] git clone failed after 3 attempts"; exit 1; }
+          cd "$SRC"
+          git submodule update --init --recursive || true
 
           export AFL_USE_ASAN=1
           export CC=afl-cc
           export CXX=afl-c++
 
-          cmake -G Ninja -S Build/Cmake -B out/asan \
+          # Build OUT-OF-SOURCE (build dir outside the source tree) with ASan.
+          BUILD=/tmp/iccdev-build
+          rm -rf "$BUILD"
+          cmake -G Ninja -S "$SRC/Build/Cmake" -B "$BUILD" \
             -DCMAKE_C_COMPILER=afl-cc -DCMAKE_CXX_COMPILER=afl-c++ \
-            -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON \
-            -DENABLE_TOOLS=ON -DENABLE_ICCXML=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_TESTING=OFF \
+            -DENABLE_ASAN=ON -DENABLE_TOOLS=ON -DENABLE_ICCXML=ON \
             -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
-            -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
-          cmake --build out/asan -j"$(nproc)"
+            -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
+          cmake --build "$BUILD" -j"$(nproc)"
 
-          BINDIR="$PWD/out/asan"
-          # Verify the primary fuzz target (and the tools used by dry-run) exist.
+          BINDIR="$BUILD"
+          # Sanity: the dominant tool (iccFromXml) must exist.
           XML="$BINDIR/Tools/IccFromXml/iccFromXml"
           if [ ! -x "$XML" ]; then
             echo "[!] iccFromXml not found under $BINDIR/Tools — build layout unexpected"
-            find "$BINDIR" -type f -executable -name 'icc*' | head -40 || true
+            find "$BINDIR" -type f -executable -name 'icc*' | head -60 || true
             exit 1
           fi
           echo "[+] Built tools under: $BINDIR"
@@ -74,160 +92,177 @@ jobs:
       - name: Fetch companion assets (xsscx/fuzz + sample TIFF)
         run: |
           set -uo pipefail
-          # Several PoC invocations pass a second, fixed .icc "companion" profile
-          # (published at github.com/xsscx/fuzz) alongside the mutated $POC.
+          # Several iccApplyProfiles PoCs pass a second, fixed .icc "companion"
+          # profile (published at github.com/xsscx/fuzz) alongside the mutated POC.
           git clone --depth 1 https://github.com/xsscx/fuzz /tmp/xsscx-fuzz 2>/dev/null || \
-            echo "[!] Could not clone xsscx/fuzz — companion-dependent replays may be skipped"
-          # A minimal valid RGB TIFF for the CVE-2026-31793 invocation.
+            echo "[!] Could not clone xsscx/fuzz — companion-dependent targets skipped"
+          # A minimal valid RGB TIFF for the iccApplyProfiles-as-profile invocation.
           python3 - <<'PY' 2>/dev/null || echo "[!] Pillow unavailable — /tmp/foo.tif not generated"
           try:
               from PIL import Image
               Image.new("RGB", (4, 4), (128, 128, 128)).save("/tmp/foo.tif")
               print("[+] wrote /tmp/foo.tif")
-          except Exception as e:
+          except Exception:
               raise SystemExit(1)
           PY
+
+      - name: Enumerate fuzz targets
+        run: |
+          set -uo pipefail
+          mkdir -p results
+          : > results/targets.tsv
+
+          # Resolve companion profiles (any path match under the cloned repo).
+          find_comp() { find /tmp/xsscx-fuzz -name "$1" 2>/dev/null | head -1; }
+          COMP_SO=$(find_comp 'so-CIccCalculatorFunc-CheckUnderflowOverflow-IccMpeCalc_cpp-Line4152.icc')
+          COMP_SEGV=$(find_comp 'segv-CIccCLUT-Interp3d-IccTagLut_cpp-Line2741.icc')
+
+          # Register a target as <label>\t<bin>\t<args-with-@@> when the binary exists.
+          reg() {
+            local label="$1" bin="$2" args="$3"
+            if [ -x "$bin" ]; then
+              printf '%s\t%s\t%s\n' "$label" "$bin" "$args" >> results/targets.tsv
+              echo "[+] target: $label -> $bin $args"
+            else
+              echo "[~] skip (not built): $label ($bin)"
+            fi
+          }
+
+          T="$BINDIR/Tools"
+          # File-input CLI tools of iccDEV; @@ is AFL's mutated input path.
+          reg iccFromXml     "$T/IccFromXml/iccFromXml"         "@@ /tmp/out.icc"
+          reg iccToXml       "$T/IccToXml/iccToXml"             "@@ /tmp/out.xml"
+          reg iccDumpProfile "$T/IccDumpProfile/iccDumpProfile" "@@"
+          reg iccDumpProfileV "$T/IccDumpProfile/iccDumpProfile" "-v @@"
+          reg iccRoundTrip   "$T/IccRoundTrip/iccRoundTrip"     "@@"
+          reg iccTiffDump    "$T/IccTiffDump/iccTiffDump"       "@@ /tmp/out.icc"
+          reg iccFromCube    "$T/IccFromCube/iccFromCube"       "@@ /tmp/out.icc"
+          # iccApplyProfiles: fuzz POC as the source profile, using a fixed
+          # companion profile (from xsscx/fuzz) as the second stage.
+          if [ -n "$COMP_SO" ]; then
+            reg iccApplyProfiles "$T/IccApplyProfiles/iccApplyProfiles" "@@ /tmp/out.tif 0 0 0 0 0 $COMP_SO 0"
+          fi
+          # iccApplyProfiles: fuzz POC as the applied profile against a fixed TIFF.
+          if [ -f /tmp/foo.tif ]; then
+            reg iccApplyProfilesTif "$T/IccApplyProfiles/iccApplyProfiles" "/tmp/foo.tif /tmp/out.tif 0 0 0 0 0 @@ 1"
+          fi
+
+          cnt=$(wc -l < results/targets.tsv)
+          echo "[+] $cnt fuzz targets enumerated"
+          [ "$cnt" -gt 0 ] || { echo "[!] no fuzz targets — aborting"; exit 1; }
 
       - name: Dry-run replay (lost-bug check)
         run: |
           set -uo pipefail
           mkdir -p results/dry_run
-
-          XML="$BINDIR/Tools/IccFromXml/iccFromXml"
-          RT="$BINDIR/Tools/IccRoundTrip/iccRoundTrip"
-          DUMP="$BINDIR/Tools/IccDumpProfile/iccDumpProfile"
-          AP="$BINDIR/Tools/IccApplyProfiles/iccApplyProfiles"
-          ANC="$BINDIR/Tools/IccApplyNamedCmm/iccApplyNamedCmm"
-          CUBE="$BINDIR/Tools/IccFromCube/iccFromCube"
-          TIFFD="$BINDIR/Tools/IccTiffDump/iccTiffDump"
-          TOXML="$BINDIR/Tools/IccToXml/iccToXml"
-
-          # Resolve companion profiles (any path match under the cloned repo).
-          find_comp() { find /tmp/xsscx-fuzz -name "$1" 2>/dev/null | head -1; }
-          COMP_SO=$(find_comp 'so-CIccCalculatorFunc-CheckUnderflowOverflow-IccMpeCalc_cpp-Line4152.icc')
-          COMP_SBO=$(find_comp 'sbo-CIccXform3DLut-Apply-IccCmm_cpp-Line5873.icc')
-          COMP_SEGV=$(find_comp 'segv-CIccCLUT-Interp3d-IccTagLut_cpp-Line2741.icc')
-          COMP_HUAF=$(find_comp 'huaf-CIccCmm-AddXform-IccCmm_cpp-Line8320.icc')
-
           export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
 
-          # Runs a command; on a real crash (exit != 0 and != 124/timeout) saves
-          # stderr + the seed under results/dry_run/<binary>_<seedname>.{txt,bin}.
-          replay() {
-            local bname="$1"; local seed="$2"; local sname="$3"; shift 3
-            local out="results/dry_run/${bname}_${sname}"
-            set +e
-            timeout 60 "$@" > /dev/null 2> "${out}.txt.tmp"
-            local ec=$?
-            set -e
-            if [ "$ec" -ne 0 ] && [ "$ec" -ne 124 ]; then
-              echo "  [!] CRASH: $bname with $sname (exit=$ec)"
-              mv "${out}.txt.tmp" "${out}.txt"
-              cp "$seed" "${out}.bin"
-            else
-              rm -f "${out}.txt.tmp"
-            fi
-          }
-
-          crash_before=$(find results/dry_run -name '*.txt' 2>/dev/null | wc -l)
+          crash_count=0
           total=0
-          for seed in "seeds/$PROJECT"/*.bin; do
-            [ -f "$seed" ] || continue
-            sname=$(basename "$seed" .bin)
-            total=$((total + 1))
-            echo "[*] Replaying $sname..."
-            # Map each PoC (by CVE id embedded in the seed name) to its recorded
-            # tool + argument invocation, substituting the seed for \$POC.
-            case "$sname" in
-              *21688*|*21498*|*31792*|*21500*|*31796*|*24409*|*22255*|*21506*|*21492*|*22046*|*24410*)
-                replay iccFromXml "$seed" "$sname" "$XML" "$seed" /tmp/out.icc ;;
-              *25582*)
-                replay iccFromXml "$seed" "$sname" "$XML" "$seed" /tmp/out.bar ;;
-              *34552*)
-                replay iccRoundTrip "$seed" "$sname" "$RT" "$seed" ;;
-              *21679*|*21680*)
-                replay iccDumpProfile "$seed" "$sname" "$DUMP" "$seed" ;;
-              *21494*)
-                replay iccDumpProfile "$seed" "$sname" "$DUMP" -v "$seed" ;;
-              *34551*)
-                replay iccTiffDump "$seed" "$sname" "$TIFFD" "$seed" /tmp/out.icc ;;
-              *22047*)
-                replay iccToXml "$seed" "$sname" "$TOXML" "$seed" /tmp/out.xml ;;
-              *27691*)
-                replay iccFromCube "$seed" "$sname" "$CUBE" "$seed" /tmp/out.icc ;;
-              *34536*)
-                [ -n "$COMP_SO" ] && replay iccApplyProfiles "$seed" "$sname" "$AP" "$seed" /dev/null 0 0 0 0 0 "$COMP_SO" 0 || echo "  [~] skip $sname (missing companion)" ;;
-              *31795*)
-                [ -n "$COMP_SBO" ] && replay iccApplyProfiles "$seed" "$sname" "$AP" "$seed" /tmp/out.tif 0 0 0 0 1 "$COMP_SBO" 40 || echo "  [~] skip $sname (missing companion)" ;;
-              *31794*)
-                [ -n "$COMP_SEGV" ] && replay iccApplyProfiles "$seed" "$sname" "$AP" "$seed" /tmp/out.tif 0 0 0 0 0 "$COMP_SEGV" 0 || echo "  [~] skip $sname (missing companion)" ;;
-              *30978*)
-                [ -n "$COMP_HUAF" ] && replay iccApplyProfiles "$seed" "$sname" "$AP" "$seed" /tmp/out.tif 2 1 0 0 0 "$COMP_HUAF" 0 || echo "  [~] skip $sname (missing companion)" ;;
-              *31793*)
-                [ -f /tmp/foo.tif ] && replay iccApplyProfiles "$seed" "$sname" "$AP" /tmp/foo.tif /tmp/out.tif 0 0 0 0 0 "$seed" 1 || echo "  [~] skip $sname (missing foo.tif)" ;;
-              *30986*)
-                # This tool reads the source profile from stdin; \$POC is the 4th arg.
-                out="results/dry_run/iccApplyNamedCmm_${sname}"
-                set +e
-                printf "'RGB '\nicEncodeFloat\n0.5 0.5 0.5\n" | \
-                  timeout 60 "$ANC" /dev/stdin 3 0 "$seed" 0 > /dev/null 2> "${out}.txt.tmp"
-                ec=$?
-                set -e
-                if [ "$ec" -ne 0 ] && [ "$ec" -ne 124 ]; then
-                  echo "  [!] CRASH: iccApplyNamedCmm with $sname (exit=$ec)"
-                  mv "${out}.txt.tmp" "${out}.txt"; cp "$seed" "${out}.bin"
-                else
-                  rm -f "${out}.txt.tmp"
-                fi ;;
-              *)
-                # Unknown seed — default to the dominant XML tool.
-                replay iccFromXml "$seed" "$sname" "$XML" "$seed" /tmp/out.icc ;;
-            esac
-          done
-          crash_after=$(find results/dry_run -name '*.txt' 2>/dev/null | wc -l)
-          echo "[+] Dry run complete: $((crash_after - crash_before)) crashes out of $total replays"
+          # Replay every seed against every enumerated target. rc is captured per
+          # invocation (no global set -e/+e toggling); exit 124 == timeout, ignore.
+          while IFS=$'\t' read -r label bin args; do
+            [ -n "$label" ] || continue
+            for seed in "seeds/$PROJECT"/*.bin; do
+              [ -f "$seed" ] || continue
+              sname=$(basename "$seed" .bin)
+              runargs="${args//@@/$seed}"
+              out="results/dry_run/${label}_${sname}"
+              total=$((total + 1))
+              rc=0
+              # shellcheck disable=SC2086
+              timeout 60 "$bin" $runargs > /dev/null 2> "${out}.txt.tmp" || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] CRASH: $label with $sname (exit=$rc)"
+                mv "${out}.txt.tmp" "${out}.txt"
+                cp "$seed" "${out}.bin"
+                crash_count=$((crash_count + 1))
+              else
+                rm -f "${out}.txt.tmp"
+              fi
+            done
+          done < results/targets.tsv
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
 
-      - name: Fuzz with AFL++
+      - name: Fuzz with AFL++ (multi-target)
         run: |
           set -uo pipefail
           mkdir -p results/afl
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+          export AFL_NO_UI=1
           export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
-          # Primary target: iccFromXml (the tool exercised by the majority of the
-          # lost-bug PoCs). @@ is the mutated input path; extra arg is the output.
-          XML="$BINDIR/Tools/IccFromXml/iccFromXml"
-          afl-fuzz -i "seeds/$PROJECT" -o results/afl -V "$FUZZ_DURATION" -m none \
-            -- "$XML" @@ /tmp/out.icc || true
+
+          n=$(wc -l < results/targets.tsv)
+          [ "$n" -gt 0 ] || { echo "[!] no targets to fuzz"; exit 0; }
+          per=$(( FUZZ_DURATION / n ))
+          [ "$per" -lt 60 ] && per=60
+          echo "[+] Fuzzing $n targets for ${per}s each"
+
+          # A benign (non-crashing) input for the afl-showmap startup probe, so a
+          # crash-PoC seed does not make us wrongly skip a valid target.
+          head -c 64 /dev/urandom > /tmp/showmap_seed || true
+
+          while IFS=$'\t' read -r label bin args; do
+            [ -n "$label" ] || continue
+            probeargs="${args//@@//tmp/showmap_seed}"
+            # shellcheck disable=SC2086
+            sm=$(AFL_SKIP_CPUFREQ=1 timeout 60 afl-showmap -m none -o /dev/null \
+                   -- "$bin" $probeargs 2>&1 || true)
+            if echo "$sm" | grep -qiE 'PROGRAM ABORT|handshake|no instrumentation|not found|No such file'; then
+              echo "[~] skip $label — afl-showmap startup failed"
+              echo "$sm" | tail -5
+              continue
+            fi
+            echo "[*] Fuzzing $label for ${per}s: $bin $args"
+            # shellcheck disable=SC2086
+            afl-fuzz -i "seeds/$PROJECT" -o "results/afl/$label" -m none -V "$per" \
+              -- "$bin" $args || true
+          done < results/targets.tsv
+          echo "[+] Multi-target fuzzing finished"
 
       - name: Triage AFL crashes
         run: |
           set -uo pipefail
           mkdir -p results/fuzz
-          XML="$BINDIR/Tools/IccFromXml/iccFromXml"
-          bname=iccFromXml
-          crash_dir=results/afl/default/crashes
-          if [ -d "$crash_dir" ]; then
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+
+          new_crashes=0
+          while IFS=$'\t' read -r label bin args; do
+            [ -n "$label" ] || continue
+            crash_dir="results/afl/$label/default/crashes"
+            [ -d "$crash_dir" ] || continue
             for crash in "$crash_dir"/*; do
               [ -f "$crash" ] || continue
               cname=$(basename "$crash")
               [ "$cname" = "README.txt" ] && continue
               cid=$(echo "$cname" | tr ':,' '__')
-              echo "[*] Triaging $cname..."
-              set +e
-              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 \
-                timeout 60 "$XML" "$crash" /tmp/out.icc > /dev/null 2> "results/fuzz/${bname}_${cid}.txt"
-              ec=$?
-              set -e
-              if [ "$ec" -ne 0 ] && [ "$ec" -ne 124 ]; then
-                cp "$crash" "results/fuzz/${bname}_${cid}.bin"
+              runargs="${args//@@/$crash}"
+              rf="results/fuzz/${label}_${cid}.txt"
+              rc=0
+              # shellcheck disable=SC2086
+              timeout 60 "$bin" $runargs > /dev/null 2> "$rf" || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] NEW CRASH: $label ($cid, exit=$rc)"
+                cp "$crash" "results/fuzz/${label}_${cid}.bin"
+                new_crashes=$((new_crashes + 1))
               else
-                rm -f "results/fuzz/${bname}_${cid}.txt"
+                rm -f "$rf"
               fi
             done
-          else
-            echo "[+] No crashes directory found at $crash_dir"
-          fi
+          done < results/targets.tsv
+          echo "[+] Triage complete: $new_crashes reproduced crashes"
+
+      - name: Sanitize result filenames
+        if: always()
+        run: |
+          # AFL emits files like id:000000,time:... — the ':' breaks
+          # actions/upload-artifact@v4, so rename any ':' under results/ to '_'.
+          find results -depth -name '*:*' 2>/dev/null | while read -r p; do
+            np=$(echo "$p" | tr ':' '_')
+            [ "$p" = "$np" ] || mv "$p" "$np"
+          done
+          echo "[+] Filename sanitization complete"
 
       - name: Generate report
         run: python3 scripts/report.py results/ "$PROJECT"

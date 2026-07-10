@@ -19,7 +19,7 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
@@ -29,9 +29,9 @@ jobs:
 
       - name: Validate seeds
         run: |
-          seed_count=$(find seeds/"$PROJECT"/ -name "*.bin" -type f 2>/dev/null | wc -l)
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
           echo "[+] Seeds available: $seed_count"
-          ls -la seeds/"$PROJECT"/ 2>/dev/null | head -20 || true
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
 
       - name: Install AFL++ and build dependencies
         run: |
@@ -42,50 +42,78 @@ jobs:
             git \
             pkg-config \
             libde265-dev \
-            zlib1g-dev
-          # libvvdec-dev is not available on all Ubuntu runners; install best-effort.
+            libx265-dev \
+            libaom-dev \
+            libjpeg-dev \
+            libpng-dev \
+            zlib1g-dev 2>/dev/null || true
+          # libvvdec-dev is not available on all Ubuntu runners; best-effort.
           sudo apt-get install -y -qq libvvdec-dev 2>/dev/null || true
 
       - name: Clone latest libheif source and build with AFL++ + ASan
         run: |
-          set -e
+          set -euo pipefail
           export CC=afl-cc
           export CXX=afl-c++
           export AFL_USE_ASAN=1
-          git clone --depth 1 https://github.com/strukturag/libheif.git /tmp/src/libheif
-          cd /tmp/src/libheif
-          export SRC=$PWD
+
+          # Clone with submodules, wrapped in a 3x retry.
+          SRC=/tmp/src/libheif
+          rm -rf "$SRC"
+          mkdir -p /tmp/src
+          n=0
+          until [ "$n" -ge 3 ]; do
+            if git clone --depth 1 --recurse-submodules \
+                 https://github.com/strukturag/libheif.git "$SRC"; then
+              break
+            fi
+            n=$((n + 1))
+            echo "[!] clone attempt $n failed, retrying..."
+            rm -rf "$SRC"
+            sleep 5
+          done
+          [ -d "$SRC" ] || { echo "[!] git clone failed after 3 attempts"; exit 1; }
+          git -C "$SRC" submodule update --init --recursive || true
+
           # Enable VVDEC only if its dev package is actually present.
           VVDEC_FLAG="-DWITH_VVDEC=OFF"
           if pkg-config --exists libvvdec 2>/dev/null; then
             VVDEC_FLAG="-DWITH_VVDEC=ON"
           fi
           echo "[+] $VVDEC_FLAG"
-          cmake -S . -B build -G "Unix Makefiles" \
+
+          # Build OUT-OF-SOURCE: build dir lives OUTSIDE the source tree.
+          BUILD=/tmp/libheif-build
+          rm -rf "$BUILD"
+          cmake -S "$SRC" -B "$BUILD" -G "Unix Makefiles" \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=afl-cc \
+            -DCMAKE_CXX_COMPILER=afl-c++ \
             -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
             -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
             -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address" \
             -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_TESTING=OFF \
             -DENABLE_PLUGIN_LOADING=OFF \
             -DWITH_EXAMPLES=ON \
-            -DBUILD_TESTING=OFF \
             -DBUILD_DEVELOPMENT_TOOLS=ON \
             -DWITH_UNCOMPRESSED_CODEC=ON \
             -DWITH_LIBDE265=ON \
             $VVDEC_FLAG \
             -DWITH_REDUCED_VISIBILITY=OFF \
             -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF
-          cmake --build build -j"$(nproc)"
-          # Record build outputs for later steps.
-          BINDIR="$SRC/build/examples"
+          cmake --build "$BUILD" -j"$(nproc)"
+
+          # heif-dec / heif-info / heif-enc / heif-thumbnailer land here.
+          BINDIR="$BUILD/examples"
           echo "SRC=$SRC" >> "$GITHUB_ENV"
+          echo "BUILD=$BUILD" >> "$GITHUB_ENV"
           echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
-          # libheif.so lives here; make sure the CLI tools can find it.
-          echo "LD_LIBRARY_PATH=$SRC/build/libheif:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
-          echo "[+] Built CLI tools:"
-          ls -la "$BINDIR" | head -20
+          # The shared libheif.so lives here; CLI tools must find it at runtime.
+          echo "LD_LIBRARY_PATH=$BUILD/libheif:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "[+] Built CLI tools in $BINDIR:"
+          ls -la "$BINDIR" | head -40
           if [ ! -x "$BINDIR/heif-dec" ] && [ ! -x "$BINDIR/heif-info" ]; then
             echo "[!] Expected CLI binaries not found — build failed"
             exit 1
@@ -95,102 +123,151 @@ jobs:
         run: |
           set -u
           mkdir -p results/dry_run
-          export ASAN_OPTIONS="abort_on_error=1:detect_leaks=0"
+          export LD_LIBRARY_PATH="$BUILD/libheif:${LD_LIBRARY_PATH:-}"
+
+          # Single source of truth for file-input CLI targets: "tool|args-with-@@".
+          # @@ marks the input path (replaced by the seed here, by AFL when fuzzing).
+          declare -a TARGETS=()
+          add_target() { [ -x "$BINDIR/$1" ] && TARGETS+=("$1|$2"); }
+          add_target heif-dec "@@ /tmp/out_heif-dec.y4m"
+          add_target heif-info "@@"
+          add_target heif-thumbnailer "@@ /tmp/out_heif-thumbnailer.png"
+          add_target heif-enc "@@ -o /tmp/out_heif-enc.heif"
+          echo "[+] Dry-run targets: ${#TARGETS[@]}"
+
           crash_count=0
           total=0
-          # Each recorded invocation: "<binary>|<args-with-POC-placeholder>"
-          # __POC__ is replaced with the seed path; __OUT__ with a scratch output path.
-          invocations=(
-            "heif-dec|__POC__ __OUT__.y4m"
-            "heif-info|__POC__"
-            "heif-dec|__POC__ __OUT__.png"
-          )
           shopt -s nullglob
-          for seed in seeds/"$PROJECT"/*.bin; do
+          for seed in "seeds/$PROJECT"/*.bin; do
             [ -f "$seed" ] || continue
             sname=$(basename "$seed" .bin)
-            for inv in "${invocations[@]}"; do
-              bin="${inv%%|*}"
-              args="${inv#*|}"
-              binpath="$BINDIR/$bin"
-              [ -x "$binpath" ] || continue
-              args="${args//__POC__/$seed}"
-              args="${args//__OUT__//tmp/out_${bin}_${sname}}"
+            for entry in "${TARGETS[@]}"; do
+              tool="${entry%%|*}"
+              args="${entry#*|}"
+              runargs="${args//@@/$seed}"
               total=$((total + 1))
-              echo "[*] Replaying $bin $args"
-              set +e
+              echo "[*] Replaying $tool with $sname..."
+              # Capture the exit code without toggling global set -e.
+              rc=0
               # shellcheck disable=SC2086
-              timeout 60 "$binpath" $args > /dev/null 2> results/dry_run/.stderr_tmp
-              exit_code=$?
-              set -e
-              if [ $exit_code -ne 0 ] && [ $exit_code -ne 124 ]; then
-                echo "  [!] CRASH: $bin with $sname (exit=$exit_code)"
-                mv results/dry_run/.stderr_tmp "results/dry_run/${bin}_${sname}.txt"
-                cp "$seed" "results/dry_run/${bin}_${sname}.bin"
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+                timeout 60 "$BINDIR/$tool" $runargs \
+                > /dev/null 2> results/dry_run/.stderr_tmp || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] CRASH: $tool with $sname (exit=$rc)"
+                mv results/dry_run/.stderr_tmp "results/dry_run/${tool}_${sname}.txt"
+                cp "$seed" "results/dry_run/${tool}_${sname}.bin"
                 crash_count=$((crash_count + 1))
               else
                 rm -f results/dry_run/.stderr_tmp
               fi
             done
           done
-          echo "[+] Dry-run complete: $crash_count crashes out of $total replays"
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
 
-      - name: Fuzz with AFL++
+      - name: Fuzz with AFL++ (multi-target)
         run: |
           set -u
           mkdir -p results/afl
-          # Primary target: heif-dec (covers 3 of 4 recorded PoCs). It reads a file
-          # argument, so AFL's @@ replaces the input path.
-          TARGET_BIN="$BINDIR/heif-dec"
-          if [ ! -x "$TARGET_BIN" ]; then
-            echo "[!] heif-dec not available — skipping fuzzing"
-            exit 0
-          fi
+          export LD_LIBRARY_PATH="$BUILD/libheif:${LD_LIBRARY_PATH:-}"
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
           export AFL_NO_UI=1
-          # Guard the whole fuzz run so a target that can't start doesn't fail the job.
-          ( AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 AFL_NO_UI=1 \
-            afl-fuzz -i seeds/"$PROJECT" -o results/afl -V "$FUZZ_DURATION" -m none \
-            -- "$TARGET_BIN" @@ /tmp/afl_out.y4m ) || true
+
+          declare -a TARGETS=()
+          add_target() { [ -x "$BINDIR/$1" ] && TARGETS+=("$1|$2"); }
+          add_target heif-dec "@@ /tmp/out_heif-dec.y4m"
+          add_target heif-info "@@"
+          add_target heif-thumbnailer "@@ /tmp/out_heif-thumbnailer.png"
+          add_target heif-enc "@@ -o /tmp/out_heif-enc.heif"
+
+          # Filter to targets that actually instrument/start under afl-showmap.
+          first_seed=$(find "seeds/$PROJECT" -name '*.bin' -type f | head -1)
+          declare -a VALID=()
+          if [ -z "$first_seed" ]; then
+            echo "[!] No seeds available — skipping fuzzing"
+            exit 0
+          fi
+          for entry in "${TARGETS[@]}"; do
+            tool="${entry%%|*}"
+            args="${entry#*|}"
+            testargs="${args//@@/$first_seed}"
+            echo "[*] afl-showmap probe: $tool"
+            # shellcheck disable=SC2086
+            if AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+                 timeout 60 afl-showmap -o /dev/null -m none -t 10000 \
+                 -- "$BINDIR/$tool" $testargs >/dev/null 2>&1; then
+              VALID+=("$entry")
+              echo "  [+] $tool OK"
+            else
+              echo "  [!] $tool failed afl-showmap startup — skipping"
+            fi
+          done
+
+          n=${#VALID[@]}
+          if [ "$n" -eq 0 ]; then
+            echo "[!] No fuzzable targets — nothing to do"
+            exit 0
+          fi
+
+          # Split the budget across targets, minimum 60s each.
+          per=$((FUZZ_DURATION / n))
+          [ "$per" -lt 60 ] && per=60
+          echo "[+] Fuzzing $n target(s) for ${per}s each"
+
+          for entry in "${VALID[@]}"; do
+            tool="${entry%%|*}"
+            args="${entry#*|}"
+            echo "[*] Fuzzing $tool ($per s)..."
+            # shellcheck disable=SC2086
+            AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 AFL_NO_UI=1 \
+              afl-fuzz -i "seeds/$PROJECT" -o "results/afl/$tool" -m none -V "$per" \
+              -- "$BINDIR/$tool" $args || true
+          done
           echo "[+] Fuzzing finished"
 
-      - name: Triage crashes
+      - name: Triage AFL++ crashes
         run: |
           set -u
           mkdir -p results/fuzz
-          export ASAN_OPTIONS="abort_on_error=1:detect_leaks=0"
-          TARGET_BIN="$BINDIR/heif-dec"
-          bname="heif-dec"
-          crash_dir="results/afl/default/crashes"
-          if [ ! -d "$crash_dir" ]; then
-            echo "[+] No crashes directory — nothing to triage"
-            exit 0
-          fi
+          export LD_LIBRARY_PATH="$BUILD/libheif:${LD_LIBRARY_PATH:-}"
+
+          declare -a TARGETS=()
+          add_target() { [ -x "$BINDIR/$1" ] && TARGETS+=("$1|$2"); }
+          add_target heif-dec "@@ /tmp/out_heif-dec.y4m"
+          add_target heif-info "@@"
+          add_target heif-thumbnailer "@@ /tmp/out_heif-thumbnailer.png"
+          add_target heif-enc "@@ -o /tmp/out_heif-enc.heif"
+
           shopt -s nullglob
           new_crashes=0
-          for crash_file in "$crash_dir"/*; do
-            [ -f "$crash_file" ] || continue
-            base=$(basename "$crash_file")
-            [ "$base" = "README.txt" ] && continue
-            crash_name=$(echo "$base" | tr ':,' '__')
-            result_file="results/fuzz/${bname}_${crash_name}.txt"
-            set +e
-            timeout 60 "$TARGET_BIN" "$crash_file" /tmp/triage_out.y4m > /dev/null 2> "$result_file"
-            replay_exit=$?
-            set -e
-            if [ $replay_exit -ne 0 ] && [ $replay_exit -ne 124 ]; then
-              echo "  [!] Confirmed crash: $crash_name"
-              cp "$crash_file" "results/fuzz/${bname}_${crash_name}.bin"
-              new_crashes=$((new_crashes + 1))
-            else
-              rm -f "$result_file"
-            fi
+          for entry in "${TARGETS[@]}"; do
+            tool="${entry%%|*}"
+            args="${entry#*|}"
+            crash_dir="results/afl/$tool/default/crashes"
+            [ -d "$crash_dir" ] || continue
+            for crash_file in "$crash_dir"/*; do
+              [ -f "$crash_file" ] || continue
+              cbase=$(basename "$crash_file")
+              [ "$cbase" = "README.txt" ] && continue
+              crash_name=$(echo "$cbase" | tr ':,' '__')
+              result_file="results/fuzz/${tool}_${crash_name}.txt"
+              runargs="${args//@@/$crash_file}"
+              rc=0
+              # shellcheck disable=SC2086
+              ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
+                timeout 60 "$BINDIR/$tool" $runargs \
+                > /dev/null 2> "$result_file" || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] Confirmed crash: $tool ($crash_name, exit=$rc)"
+                cp "$crash_file" "results/fuzz/${tool}_${crash_name}.bin"
+                new_crashes=$((new_crashes + 1))
+              else
+                rm -f "$result_file"
+              fi
+            done
           done
-          echo "[+] Triage complete: $new_crashes confirmed crashes"
-
-      - name: Generate report
-        run: python3 scripts/report.py results/ "$PROJECT"
+          echo "[+] Triage complete: $new_crashes reproduced crashes"
 
       - name: Sanitize result filenames for upload
         if: always()
@@ -198,8 +275,7 @@ jobs:
           set -u
           # actions/upload-artifact@v4 rejects any path containing a colon.
           # AFL++ names its queue/crash files "id:000000,time:0,execs:0,orig:..."
-          # which breaks the upload. Rename bottom-up so parents are renamed
-          # only after their children.
+          # Rename bottom-up so parents are renamed only after their children.
           if [ -d results ]; then
             find results -depth -name '*:*' -print0 | while IFS= read -r -d '' p; do
               d=$(dirname "$p")
@@ -208,6 +284,10 @@ jobs:
             done
           fi
           echo "[+] Sanitized colon-containing filenames under results/"
+
+      - name: Generate report
+        if: always()
+        run: python3 scripts/report.py results/ "$PROJECT"
 
       - name: Upload PoC artifacts
         uses: actions/upload-artifact@v4

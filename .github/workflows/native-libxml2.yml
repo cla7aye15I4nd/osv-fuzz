@@ -19,7 +19,7 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
@@ -39,7 +39,14 @@ jobs:
       - name: Clone and build latest libxml2 with AFL++ + ASan
         run: |
           set -euxo pipefail
-          # Use AFL++ compilers with AddressSanitizer instrumentation.
+
+          # Extra apt deps libxml2's optional features may need.
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get install -y -qq \
+            zlib1g-dev liblzma-dev libreadline-dev \
+            gettext autopoint 2>/dev/null || true
+
+          # AFL++ compilers with AddressSanitizer instrumentation.
           export CC=afl-cc
           export CXX=afl-c++
           export AFL_USE_ASAN=1
@@ -48,173 +55,194 @@ jobs:
           export LDFLAGS="-fsanitize=address"
 
           mkdir -p /tmp/src
-          git clone --depth 1 https://gitlab.gnome.org/GNOME/libxml2.git /tmp/src/libxml2
-          cd /tmp/src/libxml2
+          SRC=/tmp/src/libxml2
+          rm -rf "$SRC"
 
-          SRC="$PWD"
-          # autogen.sh regenerates the Autotools files (git tree) and forwards
-          # args to ./configure. Enable HTML/regexp/schemas so the xmllint modes
-          # exercised by the lost-bug PoCs (--html, --recover) are compiled in.
-          ./autogen.sh --without-python --with-html --with-regexps --with-schemas
+          # Robust clone: recurse submodules, retry up to 3x.
+          n=0
+          until [ "$n" -ge 3 ]; do
+            if git clone --depth 1 --recurse-submodules \
+                 https://gitlab.gnome.org/GNOME/libxml2.git "$SRC"; then
+              break
+            fi
+            n=$((n + 1))
+            echo "[!] clone attempt $n failed; retrying..."
+            rm -rf "$SRC"
+            sleep 5
+          done
+          [ -d "$SRC" ] || { echo "[!] clone failed after 3 attempts"; exit 1; }
+          cd "$SRC"
+          git submodule update --init --recursive || true
+
+          # Autotools git build: regenerate ./configure if absent, disable
+          # -Werror so newer-compiler warnings never fail the build. Enable the
+          # HTML/regexp/schemas features the recorded PoCs exercise.
+          if [ ! -x ./configure ]; then
+            if [ -x ./autogen.sh ]; then
+              NOCONFIGURE=1 ./autogen.sh || autoreconf -fi
+            else
+              autoreconf -fi
+            fi
+          fi
+          ./configure --disable-werror --without-python \
+            --with-html --with-regexps --with-schemas
           make -j"$(nproc)"
 
-          # Prefer the real ELF binary in .libs over the libtool shell wrapper so
-          # afl-fuzz drives an instrumented executable directly. Fall back to the
-          # libtool wrapper if the .libs binary is absent.
+          # Prefer the real ELF binaries in .libs over the libtool shell
+          # wrappers so afl drives instrumented executables directly.
           if [ -x "$SRC/.libs/xmllint" ]; then
-            BIN="$SRC/.libs/xmllint"
+            BINDIR="$SRC/.libs"
           else
-            BIN="$SRC/xmllint"
+            BINDIR="$SRC"
           fi
-
-          # Legacy testregexp driver (CVE-2016-1840). Present only in old trees
-          # (<=2.9.x); removed from the current source. Record it if it exists,
-          # otherwise that PoC is simply skipped below.
-          TESTREGEXP=""
-          for cand in "$SRC/.libs/testregexp" "$SRC/testregexp"; do
-            if [ -x "$cand" ]; then TESTREGEXP="$cand"; break; fi
-          done
-
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
           echo "SRC=$SRC" >> "$GITHUB_ENV"
-          echo "BINDIR=$SRC" >> "$GITHUB_ENV"
-          echo "BIN=$BIN" >> "$GITHUB_ENV"
-          echo "TESTREGEXP=$TESTREGEXP" >> "$GITHUB_ENV"
-          echo "[+] Built xmllint target: $BIN"
-          file "$BIN" || true
-          "$BIN" --version 2>&1 | head -2 || true
-          if [ -n "$TESTREGEXP" ]; then
-            echo "[+] testregexp driver available: $TESTREGEXP"
-          else
-            echo "[i] testregexp driver not present in this tree (CVE-2016-1840 skipped)"
+          echo "[+] Built CLI tools in $BINDIR:"
+          ls -la "$BINDIR" | head -40 || true
+          if [ ! -x "$BINDIR/xmllint" ]; then
+            echo "[!] xmllint not built — build failed"; exit 1
           fi
+          file "$BINDIR/xmllint" || true
+
+      - name: Enumerate fuzz targets
+        run: |
+          set -euo pipefail
+          # Build the TARGETS array: "<label>|<binary>|<args-with-@@>".
+          # Each xmllint parsing mode from the recorded PoCs is its own target,
+          # plus the legacy testregexp driver when present in the tree.
+          declare -a TARGETS=()
+          if [ -x "$BINDIR/xmllint" ]; then
+            TARGETS+=("xmllint_plain|$BINDIR/xmllint|@@")
+            TARGETS+=("xmllint_html|$BINDIR/xmllint|--html @@")
+            TARGETS+=("xmllint_recover|$BINDIR/xmllint|--recover @@")
+          fi
+          # Legacy testregexp driver (CVE-2016-1840) — only in old (<=2.9.x) trees.
+          for cand in "$BINDIR/testregexp" "$SRC/testregexp" "$SRC/.libs/testregexp"; do
+            if [ -x "$cand" ]; then
+              TARGETS+=("testregexp|$cand|@@")
+              break
+            fi
+          done
+          if [ "${#TARGETS[@]}" -eq 0 ]; then
+            echo "[!] No fuzz targets discovered"; exit 1
+          fi
+          printf '%s\n' "${TARGETS[@]}" > /tmp/targets.txt
+          echo "[+] Discovered ${#TARGETS[@]} target(s):"
+          cat /tmp/targets.txt
 
       - name: Dry-run replay (lost-bug check)
         run: |
-          set -uo pipefail
+          set +e
           mkdir -p results/dry_run
-
-          # Map a seed name to the xmllint flags its recorded PoC invocation used.
-          # Seeds are named after their CVE; unknown seeds default to plain xmllint.
-          flags_for_seed() {
-            case "$1" in
-              *2016-1837*|*2016-2073*|*2016-1839*|*2016-1833*) echo "html" ;;
-              *2016-9598*|*2016-4483*)                         echo "recover" ;;
-              *2016-1840*)                                     echo "regexp" ;;
-              *)                                               echo "plain" ;;
-            esac
-          }
-
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
           crash_count=0
           total=0
-          for seed in "seeds/$PROJECT"/*.bin; do
-            [ -f "$seed" ] || continue
-            sname="$(basename "$seed" .bin)"
-            mode="$(flags_for_seed "$sname")"
+          while IFS='|' read -r label bin args; do
+            [ -n "$label" ] || continue
+            [ -x "$bin" ] || continue
+            for seed in "seeds/$PROJECT"/*.bin; do
+              [ -f "$seed" ] || continue
+              sname=$(basename "$seed" .bin)
+              total=$((total + 1))
+              echo "[*] Replaying $label with $sname..."
+              # shellcheck disable=SC2086
+              timeout 30 "$bin" ${args/@@/"$seed"} > /dev/null 2> results/dry_run/.stderr_tmp
+              rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] CRASH: $label with $sname (exit=$rc)"
+                mv results/dry_run/.stderr_tmp "results/dry_run/${label}_${sname}.txt"
+                cp "$seed" "results/dry_run/${label}_${sname}.bin"
+                crash_count=$((crash_count + 1))
+              else
+                rm -f results/dry_run/.stderr_tmp
+              fi
+            done
+          done < /tmp/targets.txt
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
 
-            case "$mode" in
-              html)    cmd=("$BIN" --html "$seed") ; bname="xmllint" ;;
-              recover) cmd=("$BIN" --recover "$seed") ; bname="xmllint" ;;
-              plain)   cmd=("$BIN" "$seed") ; bname="xmllint" ;;
-              regexp)
-                if [ -z "$TESTREGEXP" ]; then
-                  echo "[i] Skipping $sname — testregexp driver not built in current tree"
-                  continue
-                fi
-                cmd=("$TESTREGEXP" "$seed") ; bname="testregexp" ;;
-            esac
-
-            result_file="results/dry_run/${bname}_${sname}.txt"
-            total=$((total + 1))
-            echo "[*] Replaying $bname ($mode) with $sname..."
-            set +e
-            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
-              timeout 30 "${cmd[@]}" > /dev/null 2> results/dry_run/.stderr_tmp
-            exit_code=$?
-            set -e
-            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
-              echo "  [!] CRASH: $sname (exit=$exit_code)"
-              mv results/dry_run/.stderr_tmp "$result_file"
-              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
-              crash_count=$((crash_count + 1))
-            else
-              rm -f results/dry_run/.stderr_tmp
-            fi
-          done
-          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
-
-      - name: Fuzz with AFL++
+      - name: Fuzz with AFL++ (multi-target)
         run: |
-          set -uo pipefail
+          set +e
+          mkdir -p results/afl
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
           export AFL_NO_UI=1
 
-          # Fuzz each xmllint parsing mode the lost bugs live in. testregexp is
-          # added only when the legacy driver was built. xmllint takes the input
-          # document as a file argument, so @@ is AFL's mutated input.
-          modes=("plain" "html" "recover")
-          if [ -n "$TESTREGEXP" ]; then
-            modes+=("regexp")
-          fi
-
-          num_modes=${#modes[@]}
-          per_target=$((FUZZ_DURATION / num_modes))
+          num_targets=$(grep -c . /tmp/targets.txt)
+          per_target=$((FUZZ_DURATION / num_targets))
           [ "$per_target" -lt 60 ] && per_target=60
-          echo "[+] Fuzzing ${num_modes} mode(s), ${per_target}s each"
+          echo "[+] Fuzzing ${num_targets} target(s), ${per_target}s each"
 
-          for mode in "${modes[@]}"; do
-            out_dir="results/afl/$mode"
+          while IFS='|' read -r label bin args; do
+            [ -n "$label" ] || continue
+            [ -x "$bin" ] || continue
+
+            # Skip targets that fail afl-showmap startup (instrumentation/exec issue).
+            first_seed=$(find "seeds/$PROJECT" -name '*.bin' -type f | head -1)
+            if [ -n "$first_seed" ]; then
+              # shellcheck disable=SC2086
+              AFL_QUIET=1 afl-showmap -m none -o /dev/null -- \
+                "$bin" ${args/@@/"$first_seed"} > /dev/null 2>&1
+              sm=$?
+              if [ "$sm" -ne 0 ] && [ "$sm" -ne 1 ] && [ "$sm" -ne 2 ]; then
+                echo "[!] Skipping $label — afl-showmap startup failed (rc=$sm)"
+                continue
+              fi
+            fi
+
+            out_dir="results/afl/$label"
             mkdir -p "$out_dir"
-            case "$mode" in
-              plain)   target=("$BIN" @@) ;;
-              html)    target=("$BIN" --html @@) ;;
-              recover) target=("$BIN" --recover @@) ;;
-              regexp)  target=("$TESTREGEXP" @@) ;;
-            esac
-            echo "[*] Fuzzing mode=$mode -> ${target[*]}"
+            echo "[*] Fuzzing $label -> $bin $args"
+            # shellcheck disable=SC2086
             afl-fuzz -i "seeds/$PROJECT" -o "$out_dir" -m none \
-              -V "$per_target" -- "${target[@]}" || true
+              -V "$per_target" -- "$bin" $args || true
             ls -la "$out_dir/default/crashes/" 2>/dev/null || true
-          done
+          done < /tmp/targets.txt
           echo "[+] Fuzzing step finished"
 
-      - name: Triage AFL crashes
+      - name: Triage AFL++ crashes
         run: |
-          set -uo pipefail
+          set +e
           mkdir -p results/fuzz
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
           new_crashes=0
-
-          for mode in plain html recover regexp; do
-            crash_dir="results/afl/$mode/default/crashes"
+          while IFS='|' read -r label bin args; do
+            [ -n "$label" ] || continue
+            [ -x "$bin" ] || continue
+            crash_dir="results/afl/$label/default/crashes"
             [ -d "$crash_dir" ] || continue
-            case "$mode" in
-              plain)   pre=("$BIN") ; bname="xmllint" ;;
-              html)    pre=("$BIN" --html) ; bname="xmllint" ;;
-              recover) pre=("$BIN" --recover) ; bname="xmllint" ;;
-              regexp)  pre=("$TESTREGEXP") ; bname="testregexp" ;;
-            esac
             for crash_file in "$crash_dir"/*; do
               [ -f "$crash_file" ] || continue
               case "$(basename "$crash_file")" in
                 README.txt) continue ;;
               esac
-              crash_id="$(basename "$crash_file" | tr ':,' '__')"
-              result_file="results/fuzz/${bname}_${mode}_${crash_id}.txt"
-              set +e
-              ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
-                timeout 30 "${pre[@]}" "$crash_file" > /dev/null 2> "$result_file"
-              replay_exit=$?
-              set -e
-              if [ "$replay_exit" -ne 0 ] && [ "$replay_exit" -ne 124 ]; then
-                echo "  [!] CONFIRMED CRASH: $mode/$crash_id"
-                cp "$crash_file" "results/fuzz/${bname}_${mode}_${crash_id}.bin"
+              crash_id=$(basename "$crash_file" | tr ':,' '__')
+              result_file="results/fuzz/${label}_${crash_id}.txt"
+              # shellcheck disable=SC2086
+              timeout 30 "$bin" ${args/@@/"$crash_file"} > /dev/null 2> "$result_file"
+              rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] CONFIRMED CRASH: $label/$crash_id (exit=$rc)"
+                cp "$crash_file" "results/fuzz/${label}_${crash_id}.bin"
                 new_crashes=$((new_crashes + 1))
               else
                 rm -f "$result_file"
               fi
             done
-          done
+          done < /tmp/targets.txt
           echo "[+] Triage complete: $new_crashes confirmed crashes"
+
+      - name: Sanitize result filenames
+        if: always()
+        run: |
+          # AFL filenames like id:000000,time:... contain ':' which breaks
+          # actions/upload-artifact@v4. Rename any offending path under results/.
+          if [ -d results ]; then
+            find results -depth -name '*:*' | while read -r p; do
+              d=$(dirname "$p"); b=$(basename "$p")
+              mv "$p" "$d/${b//:/_}"
+            done
+          fi
 
       - name: Generate report
         run: python3 scripts/report.py results/ "$PROJECT"

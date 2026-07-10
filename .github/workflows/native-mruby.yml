@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       fuzz_duration:
-        description: "Fuzzing duration in seconds"
+        description: "Total fuzzing duration in seconds (split across targets)"
         default: "1800"
   schedule:
     - cron: "0 13 * * 0"
@@ -19,12 +19,12 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
 
-      - name: Download seeds from R2
+      - name: Download native seeds from R2
         run: bash scripts/download_native_seeds.sh "$PROJECT"
 
       - name: Validate seeds
@@ -40,16 +40,32 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ruby rake bison 2>/dev/null || true
+          sudo apt-get install -y -qq ruby ruby-dev rake bison || true
           ruby --version || true
           rake --version || true
 
-      - name: Clone and build mruby with AFL++ + ASan
+      - name: Clone and build mruby CLI tools with AFL++ + ASan
         run: |
           set -eux
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/mruby/mruby /tmp/src/mruby
-          cd /tmp/src/mruby
+
+          # Robust clone: retry up to 3x, pull submodules recursively.
+          SRC=/tmp/src/mruby
+          rm -rf "$SRC"
+          n=0
+          until [ "$n" -ge 3 ]; do
+            if git clone --depth 1 --recurse-submodules \
+                https://github.com/mruby/mruby "$SRC"; then
+              break
+            fi
+            n=$((n + 1))
+            echo "[!] clone failed, retry $n/3"
+            rm -rf "$SRC"
+            sleep 5
+          done
+          test -d "$SRC/.git"
+          cd "$SRC"
+          git submodule update --init --recursive || true
 
           # AFL++ instrumentation with AddressSanitizer.
           # mruby's Rake build honors CC/CXX/CFLAGS/LDFLAGS (same as oss-fuzz).
@@ -63,80 +79,156 @@ jobs:
 
           rake -j"$(nproc)" all
 
-          BINDIR="$PWD/build/host/bin"
+          BINDIR="$SRC/build/host/bin"
           echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
-          echo "MRUBY_BIN=$BINDIR/mruby" >> "$GITHUB_ENV"
 
           echo "[+] Built binaries:"
           ls -la "$BINDIR" || true
+          # At minimum the interpreter must exist.
           test -x "$BINDIR/mruby"
 
       - name: Dry-run replay (lost-bug check)
         run: |
-          set -u
+          # NOTE: step runs under bash -e by default; never toggle global set -e.
+          # Capture exit codes locally with: rc=0; cmd || rc=$?
+          set +e
           mkdir -p results/dry_run
-          bin="$MRUBY_BIN"
-          bname=$(basename "$bin")
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
+
+          # Build the target table: label|command-template (@@ = input file).
+          # Only file-consuming CLI tools that were actually built are added.
+          TARGETS=()
+          [ -x "$BINDIR/mruby" ] && TARGETS+=("mruby|$BINDIR/mruby @@")
+          [ -x "$BINDIR/mrbc" ]  && TARGETS+=("mrbc|$BINDIR/mrbc -o /tmp/mrbc_out.mrb @@")
+          # mirb is an interactive REPL (reads stdin) -> not a file-input target.
+          echo "[+] Dry-run targets: ${#TARGETS[@]}"
+
           crash_count=0
           total=0
-          for seed in seeds/"$PROJECT"/*.bin; do
+          for seed in "seeds/$PROJECT"/*.bin; do
             [ -f "$seed" ] || continue
             sname=$(basename "$seed" .bin)
-            total=$((total + 1))
-            echo "[*] Replaying $bname with $sname..."
-            set +e
-            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
-              timeout 60 "$bin" "$seed" > /dev/null 2> results/dry_run/.stderr_tmp
-            exit_code=$?
-            set -e
-            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
-              echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
-              mv results/dry_run/.stderr_tmp "results/dry_run/${bname}_${sname}.txt"
-              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
-              crash_count=$((crash_count + 1))
-            else
-              rm -f results/dry_run/.stderr_tmp
-            fi
+            for entry in "${TARGETS[@]}"; do
+              label="${entry%%|*}"
+              template="${entry#*|}"
+              cmd="${template//@@/$seed}"
+              total=$((total + 1))
+              echo "[*] Replaying $label with $sname..."
+              rc=0
+              # shellcheck disable=SC2086
+              timeout 60 $cmd > /dev/null 2> results/dry_run/.stderr_tmp || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] CRASH: $label with $sname (exit=$rc)"
+                mv results/dry_run/.stderr_tmp "results/dry_run/${label}_${sname}.txt"
+                cp "$seed" "results/dry_run/${label}_${sname}.bin"
+                crash_count=$((crash_count + 1))
+              else
+                rm -f results/dry_run/.stderr_tmp
+              fi
+            done
           done
-          echo "[+] Dry run complete: $crash_count crashes out of $total seeds"
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
 
-      - name: Fuzz with AFL++
+      - name: Fuzz with AFL++ (multi-target)
         run: |
-          set -u
+          set +e
           mkdir -p results/afl
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
-          export ASAN_OPTIONS="abort_on_error=1:detect_leaks=0:symbolize=1"
-          echo "[*] Fuzzing for $FUZZ_DURATION seconds..."
-          afl-fuzz -i seeds/"$PROJECT" -o results/afl -V "$FUZZ_DURATION" \
-            -- "$MRUBY_BIN" @@ || true
+          export AFL_NO_UI=1
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+
+          # Same target table as the dry-run step.
+          TARGETS=()
+          [ -x "$BINDIR/mruby" ] && TARGETS+=("mruby|$BINDIR/mruby @@")
+          [ -x "$BINDIR/mrbc" ]  && TARGETS+=("mrbc|$BINDIR/mrbc -o /tmp/mrbc_out.mrb @@")
+
+          n_targets="${#TARGETS[@]}"
+          if [ "$n_targets" -eq 0 ]; then
+            echo "[!] No fuzzable targets found"
+            exit 0
+          fi
+
+          # Split the total budget across targets, minimum 60s each.
+          per=$((FUZZ_DURATION / n_targets))
+          [ "$per" -lt 60 ] && per=60
+          echo "[+] Fuzzing $n_targets target(s) for ${per}s each"
+
+          first_seed=$(find "seeds/$PROJECT" -name '*.bin' -type f | head -1)
+
+          for entry in "${TARGETS[@]}"; do
+            label="${entry%%|*}"
+            template="${entry#*|}"
+
+            # Skip targets that cannot even start under afl-showmap.
+            if [ -n "$first_seed" ]; then
+              showcmd="${template//@@/$first_seed}"
+              # shellcheck disable=SC2086
+              afl-showmap -o /dev/null -m none -t 5000 -- $showcmd >/dev/null 2>&1
+              sm_rc=$?
+              # afl-showmap returns the target's own exit code; only a
+              # startup failure (>=137 signal / exec error) is disqualifying.
+              if [ "$sm_rc" -ge 137 ]; then
+                echo "[!] Skipping $label — afl-showmap startup failed (rc=$sm_rc)"
+                continue
+              fi
+            fi
+
+            echo "[*] Fuzzing $label for ${per}s..."
+            # shellcheck disable=SC2086
+            afl-fuzz -i "seeds/$PROJECT" -o "results/afl/$label" \
+              -m none -V "$per" \
+              -- $template || true
+            echo "[+] Finished fuzzing $label"
+          done
           echo "[+] Fuzzing step finished"
 
       - name: Triage AFL++ crashes
         run: |
-          set -u
+          set +e
           mkdir -p results/fuzz
-          bin="$MRUBY_BIN"
-          bname=$(basename "$bin")
-          crash_dir=results/afl/default/crashes
-          if [ ! -d "$crash_dir" ]; then
-            echo "[+] No crashes directory found — nothing to triage"
-            exit 0
-          fi
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1
+          shopt -s nullglob
+
+          TARGETS=()
+          [ -x "$BINDIR/mruby" ] && TARGETS+=("mruby|$BINDIR/mruby @@")
+          [ -x "$BINDIR/mrbc" ]  && TARGETS+=("mrbc|$BINDIR/mrbc -o /tmp/mrbc_out.mrb @@")
+
           n=0
-          for crash in "$crash_dir"/*; do
-            [ -f "$crash" ] || continue
-            cname=$(basename "$crash")
-            [ "$cname" = "README.txt" ] && continue
-            n=$((n + 1))
-            echo "[*] Triaging $cname..."
-            set +e
-            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0:symbolize=1" \
-              timeout 60 "$bin" "$crash" > /dev/null 2> "results/fuzz/${bname}_${cname}.txt"
-            set -e
-            cp "$crash" "results/fuzz/${bname}_${cname}.bin"
+          for entry in "${TARGETS[@]}"; do
+            label="${entry%%|*}"
+            template="${entry#*|}"
+            crash_dir="results/afl/$label/default/crashes"
+            [ -d "$crash_dir" ] || continue
+            for crash in "$crash_dir"/*; do
+              [ -f "$crash" ] || continue
+              cname=$(basename "$crash")
+              [ "$cname" = "README.txt" ] && continue
+              n=$((n + 1))
+              echo "[*] Triaging $label / $cname..."
+              cmd="${template//@@/$crash}"
+              rc=0
+              # shellcheck disable=SC2086
+              timeout 60 $cmd > /dev/null 2> "results/fuzz/${label}_${cname}.txt" || rc=$?
+              cp "$crash" "results/fuzz/${label}_${cname}.bin"
+            done
           done
           echo "[+] Triaged $n crash inputs"
+
+      - name: Sanitize result filenames for upload
+        if: always()
+        run: |
+          # actions/upload-artifact@v4 rejects paths containing ':' — AFL names
+          # crashes like id:000000,time:... . Rename ':' -> '_' depth-first.
+          set +e
+          [ -d results ] || exit 0
+          find results -depth -name '*:*' | while read -r p; do
+            d=$(dirname "$p")
+            b=$(basename "$p")
+            nb=$(printf '%s' "$b" | tr ':' '_')
+            [ "$b" != "$nb" ] && mv "$p" "$d/$nb"
+          done
+          echo "[+] Filename sanitize complete"
 
       - name: Generate report
         run: python3 scripts/report.py results/ "$PROJECT"

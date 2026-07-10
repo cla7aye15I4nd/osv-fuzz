@@ -19,13 +19,19 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Checkout osv-fuzz
         uses: actions/checkout@v4
 
       - name: Download native seeds from R2
         run: bash scripts/download_native_seeds.sh "$PROJECT"
+
+      - name: Validate seeds
+        run: |
+          seed_count=$(find "seeds/$PROJECT/" -name "*.bin" -type f 2>/dev/null | wc -l)
+          echo "[+] Seeds available: $seed_count"
+          ls -la "seeds/$PROJECT/" 2>/dev/null | head -20 || true
 
       - name: Install AFL++ and dependencies
         run: bash scripts/setup_aflpp.sh
@@ -35,7 +41,7 @@ jobs:
           set -e
           sudo apt-get update
           sudo apt-get install -y \
-            cmake ninja-build pkg-config python3 git \
+            clang cmake ninja-build pkg-config python3 git file \
             libssl-dev libbz2-dev zlib1g-dev libxml2-dev libpcre2-dev \
             libjson-c-dev libcurl4-openssl-dev libncurses-dev
           # Rust toolchain is required by libclamav since 1.0.
@@ -48,95 +54,217 @@ jobs:
           set -e
           # Ensure cargo is on PATH (rustup installs to ~/.cargo/bin).
           [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+
+          # Clone with submodules, wrapped in a 3x retry.
+          SRC=/tmp/src/clamav
+          rm -rf "$SRC"
           mkdir -p /tmp/src
-          git clone --depth 1 https://github.com/Cisco-Talos/clamav.git /tmp/src/clamav
-          cd /tmp/src/clamav
-          mkdir -p build && cd build
-          # Build with AFL++ compiler wrappers + AddressSanitizer.
+          n=0
+          until [ "$n" -ge 3 ]; do
+            if git clone --depth 1 --recurse-submodules \
+                https://github.com/Cisco-Talos/clamav.git "$SRC"; then
+              break
+            fi
+            n=$((n + 1))
+            echo "[!] clone attempt $n failed; retrying..."
+            rm -rf "$SRC"
+            sleep 5
+          done
+          [ -d "$SRC" ] || { echo "[!] git clone failed after 3 attempts"; exit 1; }
+          git -C "$SRC" submodule update --init --recursive || true
+
+          # Build OUT-OF-SOURCE (build dir outside the source tree) with AFL++
+          # compiler wrappers + AddressSanitizer.
           # libmspack (CVE-2017-6419) is built-in by default.
+          BUILD=/tmp/clamav-build
+          rm -rf "$BUILD"
+          mkdir -p "$BUILD"
           export AFL_USE_ASAN=1
           CC=afl-cc CXX=afl-c++ \
-          cmake .. -G Ninja \
+          cmake -S "$SRC" -B "$BUILD" -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
             -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
             -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address" \
+            -DBUILD_TESTING=OFF \
             -DENABLE_MILTER=OFF -DENABLE_TESTS=OFF -DENABLE_EXAMPLES=OFF \
+            -DENABLE_DOCS=OFF -DENABLE_MAN_PAGES=OFF \
             -DBYTECODE_RUNTIME=interpreter
-          ninja
-          BIN="/tmp/src/clamav/build/clamscan/clamscan"
+          ninja -C "$BUILD"
+
+          BIN="$BUILD/clamscan/clamscan"
           if [ ! -x "$BIN" ]; then
             echo "[!] Build failed — $BIN not found"
             exit 1
           fi
-          # clamscan refuses to start with no signature database; provide a dummy one.
-          # The vulnerable parsers run during the scan regardless of loaded signatures.
+
+          # clamscan refuses to start with no signature database; provide a dummy
+          # one. The vulnerable parsers run during the scan regardless of loaded
+          # signatures.
           mkdir -p /tmp/db
           printf 'dummy:0:0:deadbeef\n' > /tmp/db/dummy.ndb
-          echo "BINDIR=/tmp/src/clamav/build/clamscan" >> "$GITHUB_ENV"
-          echo "BIN=$BIN" >> "$GITHUB_ENV"
-          echo "[+] Built target:"
+
+          # Record BINDIR (build root holding the built CLI tools) and the shared
+          # library search path so the in-tree ASan binaries can load libclamav.
+          echo "BINDIR=$BUILD" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$BUILD/libclamav:$BUILD/libclamav_rust:$BUILD/libclammspack:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "[+] Built clamscan:"
           ls -la "$BIN"
-          "$BIN" --version || true
+          LD_LIBRARY_PATH="$BUILD/libclamav:$BUILD/libclamav_rust:$BUILD/libclammspack" \
+            "$BIN" --version || true
+
+      - name: Enumerate fuzz targets (afl-showmap gate)
+        run: |
+          set -u
+          # Candidate file-input CLI tools for clamav. Each entry is
+          #   tool|relative-binary-path|arg-template   (@@ = input file)
+          # clamscan is the primary scan-format consumer (recorded PoC); clambc
+          # and sigtool are additional file-parsing CLI tools. Tools whose binary
+          # is missing or that fail afl-showmap startup are skipped automatically.
+          CANDIDATES=(
+            "clamscan|clamscan/clamscan|--database=/tmp/db @@"
+            "clambc|clambc/clambc|@@"
+            "sigtool|sigtool/sigtool|--vba @@"
+          )
+
+          sample=$(find "seeds/$PROJECT" -name '*.bin' -type f 2>/dev/null | head -n1)
+          if [ -z "$sample" ]; then
+            echo "[!] No seeds found — cannot gate targets"
+            exit 1
+          fi
+
+          : > /tmp/fuzz_targets.txt
+          for entry in "${CANDIDATES[@]}"; do
+            tool="${entry%%|*}"
+            rest="${entry#*|}"
+            relbin="${rest%%|*}"
+            args="${rest#*|}"
+            bin="$BINDIR/$relbin"
+            if [ ! -x "$bin" ]; then
+              echo "[-] skip $tool: binary not built ($bin)"
+              continue
+            fi
+            # afl-showmap must be able to start the instrumented target and
+            # capture a non-empty coverage map.
+            runargs="${args//@@/$sample}"
+            mapfile="/tmp/showmap_${tool}.map"
+            rm -f "$mapfile"
+            # shellcheck disable=SC2086
+            AFL_QUIET=1 ASAN_OPTIONS=abort_on_error=0:detect_leaks=0 \
+              timeout 60 afl-showmap -m none -t 10000 -o "$mapfile" \
+              -- "$bin" $runargs >/dev/null 2>&1 || true
+            if [ -s "$mapfile" ]; then
+              echo "$tool|$bin|$args" >> /tmp/fuzz_targets.txt
+              echo "[+] target: $tool ($bin) args='$args'"
+            else
+              echo "[-] skip $tool: failed afl-showmap startup (no coverage map)"
+            fi
+          done
+
+          if [ ! -s /tmp/fuzz_targets.txt ]; then
+            echo "[!] No fuzzable targets survived the afl-showmap gate"
+            exit 1
+          fi
+          echo "[+] Wired targets:"
+          cat /tmp/fuzz_targets.txt
 
       - name: Dry-run replay (lost-bug check)
         run: |
-          set -u
+          set +e
           mkdir -p results/dry_run
-          bname=$(basename "$BIN")
-          shopt -s nullglob
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
           crash_count=0
           total=0
-          for seed in seeds/"$PROJECT"/*.bin; do
-            [ -f "$seed" ] || continue
-            sname=$(basename "$seed" .bin)
-            result_file="results/dry_run/${bname}_${sname}.txt"
-            total=$((total + 1))
-            echo "[*] Replaying $bname with $sname..."
-            set +e
-            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
-            timeout 60 "$BIN" --database=/tmp/db "$seed" > /dev/null 2> results/dry_run/.stderr_tmp
-            exit_code=$?
-            set -e
-            if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 124 ]; then
-              echo "  [!] CRASH: $bname with $sname (exit=$exit_code)"
-              mv results/dry_run/.stderr_tmp "$result_file"
-              cp "$seed" "results/dry_run/${bname}_${sname}.bin"
-              crash_count=$((crash_count + 1))
-            else
-              rm -f results/dry_run/.stderr_tmp
-            fi
-          done
-          echo "[+] Dry run complete: $crash_count crashes out of $total tests"
+          while IFS='|' read -r tool bin args; do
+            [ -n "$tool" ] || continue
+            for seed in "seeds/$PROJECT"/*.bin; do
+              [ -f "$seed" ] || continue
+              sname=$(basename "$seed" .bin)
+              runargs="${args//@@/$seed}"
+              total=$((total + 1))
+              echo "[*] Replaying $tool with $sname..."
+              rc=0
+              # shellcheck disable=SC2086
+              timeout 60 "$bin" $runargs > /dev/null 2> results/dry_run/.stderr_tmp || rc=$?
+              if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+                echo "  [!] CRASH: $tool with $sname (exit=$rc)"
+                mv results/dry_run/.stderr_tmp "results/dry_run/${tool}_${sname}.txt"
+                cp "$seed" "results/dry_run/${tool}_${sname}.bin"
+                crash_count=$((crash_count + 1))
+              else
+                rm -f results/dry_run/.stderr_tmp
+              fi
+            done
+          done < /tmp/fuzz_targets.txt
+          echo "[+] Dry run complete: $crash_count crashes out of $total replays"
 
-      - name: Fuzz with AFL++
+      - name: Fuzz with AFL++ (multi-target)
         run: |
           set -u
           mkdir -p results/afl
           export AFL_SKIP_CPUFREQ=1
           export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
-          afl-fuzz -i seeds/"$PROJECT" -o results/afl -V "$FUZZ_DURATION" \
-            -- "$BIN" --database=/tmp/db @@ || true
+          export AFL_NO_UI=1
+
+          ntargets=$(grep -c . /tmp/fuzz_targets.txt)
+          [ "$ntargets" -ge 1 ] || ntargets=1
+          per=$(( FUZZ_DURATION / ntargets ))
+          [ "$per" -lt 60 ] && per=60
+          echo "[*] Fuzzing $ntargets target(s), ${per}s each"
+
+          while IFS='|' read -r tool bin args; do
+            [ -n "$tool" ] || continue
+            echo "[*] Fuzzing $tool for ${per}s ($bin $args)..."
+            # shellcheck disable=SC2086
+            afl-fuzz -i "seeds/$PROJECT" -o "results/afl/$tool" \
+              -m none -V "$per" \
+              -- "$bin" $args || true
+          done < /tmp/fuzz_targets.txt
+          echo "[+] Fuzzing step finished"
 
       - name: Triage AFL++ crashes
         run: |
-          set -u
+          set +e
           mkdir -p results/fuzz
-          bname=$(basename "$BIN")
+          export ASAN_OPTIONS=abort_on_error=1:detect_leaks=0
           shopt -s nullglob
-          for crash in results/afl/default/crashes/*; do
-            [ -f "$crash" ] || continue
-            cname=$(basename "$crash")
-            [ "$cname" = "README.txt" ] && continue
-            result_file="results/fuzz/${bname}_${cname}.txt"
-            echo "[*] Triaging $cname..."
-            set +e
-            ASAN_OPTIONS="abort_on_error=1:detect_leaks=0" \
-            timeout 60 "$BIN" --database=/tmp/db "$crash" > /dev/null 2> "$result_file"
-            set -e
-            cp "$crash" "results/fuzz/${bname}_${cname}.bin"
-          done
+          new_crashes=0
+          while IFS='|' read -r tool bin args; do
+            [ -n "$tool" ] || continue
+            crash_dir="results/afl/$tool/default/crashes"
+            [ -d "$crash_dir" ] || continue
+            for crash in "$crash_dir"/*; do
+              [ -f "$crash" ] || continue
+              cname=$(basename "$crash")
+              [ "$cname" = "README.txt" ] && continue
+              result_file="results/fuzz/${tool}_${cname}.txt"
+              runargs="${args//@@/$crash}"
+              echo "[*] Triaging $tool / $cname..."
+              # shellcheck disable=SC2086
+              timeout 60 "$bin" $runargs > /dev/null 2> "$result_file"
+              cp "$crash" "results/fuzz/${tool}_${cname}.bin"
+              new_crashes=$((new_crashes + 1))
+            done
+          done < /tmp/fuzz_targets.txt
+          echo "[+] Triage complete: $new_crashes crash file(s) processed"
+
+      - name: Sanitize result filenames
+        if: always()
+        run: |
+          # AFL crash files (id:000000,time:...) contain ':' which breaks
+          # actions/upload-artifact@v4. Rename any offending path under results/.
+          set -u
+          if [ -d results ]; then
+            find results -depth -name '*:*' | while read -r p; do
+              d=$(dirname "$p")
+              b=$(basename "$p")
+              nb=$(printf '%s' "$b" | tr ':' '_')
+              [ "$b" = "$nb" ] && continue
+              mv -f "$p" "$d/$nb"
+            done
+          fi
+          echo "[+] Sanitized result filenames"
 
       - name: Generate report
         run: python3 scripts/report.py results/ "$PROJECT"
