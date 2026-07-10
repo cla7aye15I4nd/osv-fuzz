@@ -192,6 +192,23 @@ jobs:
       - name: Generate report
         run: python3 scripts/report.py results/ "$PROJECT"
 
+      - name: Sanitize result filenames for upload
+        if: always()
+        run: |
+          set -u
+          # actions/upload-artifact@v4 rejects any path containing a colon.
+          # AFL++ names its queue/crash files "id:000000,time:0,execs:0,orig:..."
+          # which breaks the upload. Rename bottom-up so parents are renamed
+          # only after their children.
+          if [ -d results ]; then
+            find results -depth -name '*:*' -print0 | while IFS= read -r -d '' p; do
+              d=$(dirname "$p")
+              b=$(basename "$p")
+              mv -f "$p" "$d/${b//:/_}"
+            done
+          fi
+          echo "[+] Sanitized colon-containing filenames under results/"
+
       - name: Upload PoC artifacts
         uses: actions/upload-artifact@v4
         if: always()

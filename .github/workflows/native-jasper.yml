@@ -77,14 +77,15 @@ jobs:
 
           # Recorded invocations, encoded as "<binary>|<pre-args...>|<post-args...>".
           # $POC is substituted for the seed path between pre and post args.
+          # NOTE: outer script intentionally does NOT use `set -e`. Do not enable
+          # it here — a nonzero binary exit is expected (decode errors / crashes)
+          # and must be returned to the caller, not abort the step.
           run_invocation () {
             local bin="$1"; shift
             local outfile="$1"; shift
-            set +e
+            local ec=0
             ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
-              timeout 30 "$BINDIR/$bin" "$@" > /dev/null 2> "$outfile"
-            local ec=$?
-            set -e
+              timeout 30 "$BINDIR/$bin" "$@" > /dev/null 2> "$outfile" || ec=$?
             return $ec
           }
 
@@ -173,11 +174,9 @@ jobs:
             local crashid
             crashid=$(basename "$crash" | tr ':,' '__')
             local out="results/fuzz/${bin}_${crashid}.txt"
-            set +e
+            local ec=0
             ASAN_OPTIONS=abort_on_error=1:detect_leaks=0 \
-              timeout 30 "$BINDIR/$bin" "$@" > /dev/null 2> "$out"
-            local ec=$?
-            set -e
+              timeout 30 "$BINDIR/$bin" "$@" > /dev/null 2> "$out" || ec=$?
             if [ "$ec" -ne 0 ] && [ "$ec" -ne 124 ]; then
               echo "  [!] Reproduced crash: ${bin}_${crashid} (exit=$ec)"
               cp "$crash" "results/fuzz/${bin}_${crashid}.bin"

@@ -216,6 +216,19 @@ jobs:
       - name: Generate report
         run: python3 scripts/report.py results/ "$PROJECT"
 
+      - name: Sanitize AFL result filenames for upload
+        if: always()
+        run: |
+          # actions/upload-artifact@v4 rejects any path containing ':'.
+          # AFL++ names its queue/crash inputs like
+          #   id:000000,time:0,execs:0,orig:CVE-2018-14471.bin
+          # so strip colons from every file/dir under results/ before upload.
+          [ -d results ] || exit 0
+          find results -depth -name '*:*' -print0 | while IFS= read -r -d '' p; do
+            newp="$(dirname "$p")/$(basename "$p" | tr ':' '_')"
+            [ "$p" = "$newp" ] || mv -f "$p" "$newp"
+          done
+
       - name: Upload full results
         uses: actions/upload-artifact@v4
         if: always()
