@@ -59,7 +59,11 @@ jobs:
           # --disable-shared => programs/ and examples/ are real ASan executables
           # (no libtool wrapper scripts). Do NOT pass --enable-release: it disables
           # unstable DWG features that some of these older CVEs live in.
-          ./configure --disable-shared --disable-bindings --disable-docs
+          # --disable-werror: git checkouts default to -Werror, and the AFL++
+          # instrumentation macros (__AFL_INIT/__AFL_LOOP) expand to statements
+          # after declarations + trip -Wmissing-field-initializers in programs/,
+          # which would otherwise abort the harness build under -Werror.
+          ./configure --disable-shared --disable-bindings --disable-docs --disable-werror
           make -j"$(nproc)"
 
           BINDIR="$SRC/programs"

@@ -39,7 +39,9 @@ jobs:
       - name: Clone and build latest libtiff with AFL++ + ASan
         run: |
           set -eux
-          git clone --depth 1 https://github.com/vadz/libtiff.git /tmp/libtiff
+          # The old github.com/vadz/libtiff mirror is archived/obsolete (frozen
+          # in 2017); development moved to GitLab. Clone the current upstream.
+          git clone --depth 1 https://gitlab.com/libtiff/libtiff.git /tmp/libtiff
           cd /tmp/libtiff
           # Regenerate configure from configure.ac (autoconf/automake/libtool
           # were installed by setup_aflpp.sh).

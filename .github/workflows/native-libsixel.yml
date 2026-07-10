@@ -38,8 +38,10 @@ jobs:
           bash scripts/setup_aflpp.sh
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get install -y -qq \
-            meson \
-            ninja-build \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
             libpng-dev \
             libjpeg-dev \
             libcurl4-openssl-dev \
@@ -57,15 +59,14 @@ jobs:
           export CC=afl-cc
           export CXX=afl-c++
           export AFL_USE_ASAN=1
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          export LDFLAGS="-fsanitize=address"
           cd /tmp/src/libsixel
-          meson setup build \
-            -Dbuildtype=debug \
-            -Db_sanitize=address \
-            -Db_lundef=false \
-            -Dc_args="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
-            -Dc_link_args="-fsanitize=address"
-          meson compile -C build
-          BINDIR="$(pwd)/build/converters"
+          # libsixel uses autotools (configure.ac / autogen.sh), not meson.
+          ./autogen.sh
+          ./configure --enable-debug
+          make -j"$(nproc)"
+          BINDIR="$(pwd)/converters"
           echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
           echo "IMG2SIXEL=$BINDIR/img2sixel" >> "$GITHUB_ENV"
           echo "[+] Built binaries:"

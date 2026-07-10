@@ -70,7 +70,7 @@ jobs:
             -Db_sanitize=address \
             -Db_lundef=false \
             -Dtests=enabled \
-            -Dutilities=true \
+            -Dutilities=enabled \
             --buildtype=debug
           ninja -C build
           # Record the target binary path for later steps.

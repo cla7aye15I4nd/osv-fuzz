@@ -70,6 +70,7 @@ jobs:
             -DBUILD_SHARED_LIBS=ON \
             -DENABLE_PLUGIN_LOADING=OFF \
             -DWITH_EXAMPLES=ON \
+            -DBUILD_TESTING=OFF \
             -DBUILD_DEVELOPMENT_TOOLS=ON \
             -DWITH_UNCOMPRESSED_CODEC=ON \
             -DWITH_LIBDE265=ON \

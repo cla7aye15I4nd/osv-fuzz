@@ -63,7 +63,11 @@ jobs:
 
           # --- Autotools build (same path oss-fuzz uses) ---
           ./bootstrap.sh
-          ./configure --prefix="$PREFIX" --disable-shared
+          # libgd's configure auto-adds -Werror for git checkouts with a GCC-
+          # like compiler (configure.ac), turning any warning from tip-of-tree
+          # master or the afl-cc/ASan toolchain into a hard build error.
+          # Disable it so the latest source always builds.
+          ./configure --prefix="$PREFIX" --disable-shared --disable-werror
           make -j"$(nproc)"
           make install
           # Shipped CLI tools now in $BINDIR: gd2togif gd2topng gdtopng ...

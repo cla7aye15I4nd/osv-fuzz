@@ -39,13 +39,18 @@ jobs:
       - name: Clone and build latest jasper with AFL++ + ASan
         run: |
           set -euxo pipefail
+          # libjpeg-dev satisfies JAS_ENABLE_LIBJPEG (find_package(JPEG)).
+          sudo apt-get install -y -qq libjpeg-dev 2>/dev/null || true
           mkdir -p /tmp/src
           git clone --depth 1 https://github.com/jasper-software/jasper.git /tmp/src/jasper
           cd /tmp/src/jasper
 
           export AFL_USE_ASAN=1
           # afl-cc/afl-c++ instrument; -fsanitize=address + AFL_USE_ASAN give ASan coverage.
-          cmake -S . -B build \
+          # jasper forbids in-source builds; use a build dir OUTSIDE the source tree.
+          BUILD_DIR=/tmp/jasper-build
+          rm -rf "$BUILD_DIR"
+          cmake -S . -B "$BUILD_DIR" \
             -DCMAKE_C_COMPILER=afl-cc -DCMAKE_CXX_COMPILER=afl-c++ \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
@@ -53,10 +58,13 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
             -DJAS_ENABLE_SHARED=false \
             -DJAS_ENABLE_PROGRAMS=true \
-            -DJAS_ENABLE_LIBJPEG=true
-          cmake --build build -j"$(nproc)"
+            -DJAS_ENABLE_LIBJPEG=true \
+            -DJAS_ENABLE_LIBHEIF=false \
+            -DJAS_ENABLE_OPENGL=false \
+            -DJAS_ENABLE_DOC=false
+          cmake --build "$BUILD_DIR" -j"$(nproc)"
 
-          BINDIR="$PWD/build/src/app"
+          BINDIR="$BUILD_DIR/src/app"
           echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
           echo "[+] Built binaries:"
           ls -la "$BINDIR/jasper" "$BINDIR/imginfo"
