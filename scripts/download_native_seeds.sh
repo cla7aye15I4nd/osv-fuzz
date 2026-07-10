@@ -38,7 +38,7 @@ for obj in data.get('result', []):
         print(k)
 " 2>/dev/null); do
     filename=$(basename "$key")
-    if npx wrangler r2 object get "$BUCKET/$key" --file "$DEST/$filename" 2>/dev/null; then
+    if npx wrangler r2 object get "$BUCKET/$key" --remote --file "$DEST/$filename" 2>/dev/null; then
         seed_count=$((seed_count + 1))
     fi
 done
