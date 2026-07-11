@@ -57,6 +57,16 @@ jobs:
           export LDFLAGS="-fsanitize=address"
           cd /tmp/src/libjpeg
           ./configure
+          # configure derives the makefile-settings suffix from the compiler
+          # basename (e.g. CC=afl-cc -> SETTINGS=afl), but upstream only ships
+          # Makefile_Settings.{gcc,clang}. Materialise the derived settings file
+          # from the gcc template so the include in Makefile.template resolves.
+          # AFL_USE_ASAN=1 makes afl-c++ add ASan instrumentation itself.
+          settings=$(sed -n 's/^SETTINGS[[:space:]]*=[[:space:]]*//p' automakefile | tr -d '[:space:]')
+          echo "[+] Derived SETTINGS=$settings"
+          if [ -n "$settings" ] && [ ! -f "Makefile_Settings.$settings" ]; then
+            cp Makefile_Settings.gcc "Makefile_Settings.$settings"
+          fi
           make -j"$(nproc)"
           BINDIR="$(pwd)"
           BIN="$BINDIR/jpeg"
