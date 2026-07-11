@@ -42,6 +42,7 @@ jobs:
             autoconf \
             automake \
             libtool \
+            libtool-bin \
             unzip
 
       - name: Clone and build latest flac with AFL++ + ASan
@@ -67,7 +68,15 @@ jobs:
           ./autogen.sh
           ./configure --enable-oss-fuzzers --enable-static --disable-shared \
                       --disable-examples --disable-doxygen-docs
-          make -j"$(nproc)"
+          # The fuzzer flag (-fsanitize=...,fuzzer-no-link) makes Clang predefine
+          # FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION, which turns on the
+          # alloc_check_* hooks in libFLAC's memory.o. Those globals are defined
+          # only in the fuzzer harnesses (oss-fuzz/common.h), so a top-level
+          # `make` fails to link the flac/metaflac CLI tools. We only drive
+          # fuzzer_encoder, so build just its library deps and the harness.
+          make -j"$(nproc)" -C src/libFLAC
+          make -j"$(nproc)" -C src/libFLAC++
+          make -j"$(nproc)" -C oss-fuzz fuzzer_encoder
 
           # Fuzzer harness binaries land in oss-fuzz/ ; we drive fuzzer_encoder.
           BINDIR="$PWD/oss-fuzz"
