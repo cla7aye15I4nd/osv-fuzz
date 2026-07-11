@@ -57,6 +57,21 @@ jobs:
           export CXX=afl-c++
           export AFL_USE_ASAN=1
           cd /tmp/src/rizin
+          # sdb_gen (and other codegen tools) are built ASan-instrumented and
+          # executed during the build; the produced rizin binary is likewise
+          # ASan-instrumented. Both link against the shared ASan runtime
+          # (libclang_rt.asan-x86_64.so), which is not on the default loader
+          # path. Expose its directory and persist it to the later replay/fuzz
+          # steps via GITHUB_ENV so those runs can load it too.
+          ASAN_SO="$(clang -print-file-name=libclang_rt.asan-x86_64.so)"
+          if [ -f "$ASAN_SO" ]; then
+            ASAN_DIR="$(dirname "$ASAN_SO")"
+            export LD_LIBRARY_PATH="$ASAN_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+            echo "[+] ASan runtime dir: $ASAN_DIR"
+          else
+            echo "[!] Could not locate libclang_rt.asan-x86_64.so (got: $ASAN_SO)"
+          fi
           # meson is the only supported build system for rizin.
           # b_sanitize=address injects -fsanitize=address -fno-omit-frame-pointer;
           # --buildtype=debug gives -g -O0; b_lundef=false lets the ASan runtime
