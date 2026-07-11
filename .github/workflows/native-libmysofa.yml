@@ -42,6 +42,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/src
+          # mysofa2json is defined inside the CMake `if(BUILD_TESTS)` block,
+          # which also does `find_package(CUnit REQUIRED)`. Enable tests and
+          # provide CUnit so the fuzz target actually gets built.
+          sudo apt-get update
+          sudo apt-get install -y libcunit1-dev
           git clone --depth 1 https://github.com/hoene/libmysofa.git /tmp/src/libmysofa
           cd /tmp/src/libmysofa
           mkdir -p build && cd build
@@ -50,7 +55,7 @@ jobs:
             -DADDRESS_SANITIZE=ON \
             -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
-            -DBUILD_TESTS=OFF ..
+            -DBUILD_TESTS=ON ..
           make -j"$(nproc)" mysofa2json
           # Record the built binary path for later steps
           BIN="/tmp/src/libmysofa/build/src/mysofa2json"
