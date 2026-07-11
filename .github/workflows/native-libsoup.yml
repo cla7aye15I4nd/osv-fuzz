@@ -64,7 +64,7 @@ jobs:
           # replay a single input file and can be driven by afl-fuzz with @@.
           # b_lundef=false so -fsanitize=fuzzer/address link cleanly.
           meson setup _build \
-            -Dfuzzing=enabled -Dtests=false \
+            -Dfuzzing=enabled -Dtests=false -Dtls_check=false \
             -Dintrospection=disabled -Dvapi=disabled -Ddocs=disabled -Dsysprof=disabled \
             -Db_sanitize=address -Db_lundef=false \
             --buildtype=debugoptimized \
