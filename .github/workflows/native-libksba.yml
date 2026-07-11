@@ -50,6 +50,10 @@ jobs:
           export CC=afl-cc
           export CXX=afl-c++
           export AFL_USE_ASAN=1
+          # libksba builds a code-generator (asn1-gentables) with ASan and runs
+          # it at build time; LeakSanitizer aborts on its harmless leaks and
+          # breaks the build. Disable leak detection during the build only.
+          export ASAN_OPTIONS=detect_leaks=0
           export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
           export CXXFLAGS="$CFLAGS"
           export LDFLAGS="-fsanitize=address"
