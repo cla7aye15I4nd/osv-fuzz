@@ -54,7 +54,10 @@ jobs:
           export SRC=/tmp/src/gnutls
           rm -rf "$SRC"
           mkdir -p /tmp/src
-          git clone --depth=1 https://github.com/gnutls/gnutls "$SRC"
+          # Pin to 3.8.10: the last release requiring nettle >= 3.6, which
+          # Ubuntu 24.04's nettle-dev (3.9.1) satisfies. gnutls 3.8.11+ bumped
+          # NETTLE_MINIMUM to 3.10, which is not packaged for this runner.
+          git clone --depth=1 --branch 3.8.10 https://github.com/gnutls/gnutls "$SRC"
           cd "$SRC"
 
           # bootstrap needs the gnulib submodule (provides gnulib-tool);
