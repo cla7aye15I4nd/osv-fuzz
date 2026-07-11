@@ -76,12 +76,12 @@ jobs:
 
           # --- ffmpeg / ffprobe CLI with AFL++ + ASan (covers the -i <file> PoCs) ---
           # FFmpeg ships a hand-written ./configure (NOT autotools/cmake); no
-          # autogen/autoreconf needed. --disable-werror keeps a fresh clone from
-          # failing on new compiler warnings; --disable-doc trims the build.
+          # autogen/autoreconf needed. FFmpeg has no --disable-werror flag and
+          # does not use -Werror by default; --disable-doc trims the build.
           ./configure \
             --cc=afl-cc --cxx=afl-c++ \
             --enable-gpl --enable-nonfree \
-            --disable-stripping --disable-doc --disable-werror \
+            --disable-stripping --disable-doc \
             --extra-cflags="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
             --extra-cxxflags="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
             --extra-ldflags="-fsanitize=address"
@@ -109,7 +109,7 @@ jobs:
             ./configure \
               --cc=afl-cc --cxx=afl-c++ \
               --enable-gpl --enable-nonfree \
-              --disable-stripping --disable-doc --disable-werror \
+              --disable-stripping --disable-doc \
               --enable-ossfuzz \
               --extra-cflags="-g -O1 -fsanitize=address,fuzzer-no-link -fno-omit-frame-pointer" \
               --extra-cxxflags="-g -O1 -fsanitize=address,fuzzer-no-link -fno-omit-frame-pointer" \
