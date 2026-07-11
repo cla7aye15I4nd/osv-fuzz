@@ -52,6 +52,9 @@ jobs:
           git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
           cd /tmp/oss-fuzz && git sparse-checkout set projects/vulkan-loader
           cp -r /tmp/oss-fuzz/projects/vulkan-loader/* /tmp/src/
+          # Fuzzer sources/headers live in the fuzzers/ subdir upstream; flatten
+          # them into $SRC as the project Dockerfile does (COPY fuzzers/*.h fuzzers/*_fuzzer.c ... $SRC/)
+          cp /tmp/oss-fuzz/projects/vulkan-loader/fuzzers/* /tmp/src/
 
       - name: Build fuzz targets with AFL++
         run: |
