@@ -164,10 +164,3 @@ jobs:
           path: results/pocs/
           retention-days: 90
 
-      - name: Upload full results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: results-${{ env.PROJECT }}
-          path: results/
-          retention-days: 30

@@ -164,18 +164,3 @@ jobs:
       - name: Generate report
         run: python3 scripts/report.py results/ "$PROJECT"
 
-      - name: Upload full results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: results-native-mupdf
-          path: results/
-          retention-days: 30
-
-      - name: Upload PoC artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: pocs-native-mupdf
-          path: results/pocs/
-          retention-days: 90
