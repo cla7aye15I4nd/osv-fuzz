@@ -50,6 +50,9 @@ jobs:
           git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
           cd /tmp/oss-fuzz && git sparse-checkout set projects/mupdf
           cp -r /tmp/oss-fuzz/projects/mupdf/* /tmp/src/
+          # Fetch the PDF fuzzing dictionary (matches oss-fuzz Dockerfile ADD line)
+          curl -fsSL https://raw.githubusercontent.com/rc0r/afl-fuzz/master/dictionaries/pdf.dict \
+            -o /tmp/src/pdf_fuzzer.dict
 
       - name: Build fuzz targets with AFL++
         run: |
