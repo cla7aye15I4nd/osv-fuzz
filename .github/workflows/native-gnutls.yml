@@ -70,8 +70,11 @@ jobs:
 
           # --enable-fuzzer-target builds the fuzz/ targets; use bundled
           # libtasn1 + libunistring and drop p11-kit/docs to stay self-contained.
+          # --disable-full-test-suite: git builds default it on, which makes
+          # configure require libev4 (and other slow test-only deps) that we
+          # don't need for the fuzz targets or certtool.
           ./configure --enable-fuzzer-target --disable-doc \
-            --disable-hardware-acceleration \
+            --disable-hardware-acceleration --disable-full-test-suite \
             --without-p11-kit --with-included-libtasn1 --with-included-unistring \
             --disable-maintainer-mode
 
