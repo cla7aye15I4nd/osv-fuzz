@@ -47,7 +47,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             autoconf automake libtool bison re2c pkg-config \
-            libxml2-dev libsqlite3-dev zlib1g-dev \
+            libxml2-dev libsqlite3-dev zlib1g-dev libpng-dev \
             2>/dev/null || true
 
           mkdir -p /tmp/src
