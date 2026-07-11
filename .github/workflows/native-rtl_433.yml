@@ -42,6 +42,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/src
+          # RTL-SDR support is ON by default in rtl_433's CMakeLists and its
+          # absence is a fatal configure error, so install the dev packages the
+          # recorded recipe was built against (librtlsdr + libusb-1.0).
+          sudo apt-get update
+          sudo apt-get install -y librtlsdr-dev libusb-1.0-0-dev
           git clone --depth 1 --recursive https://github.com/dd32/rtl_433.git /tmp/src/rtl_433
           cd /tmp/src/rtl_433
           # Build with AFL++ instrumentation + AddressSanitizer (adapted from the
