@@ -56,6 +56,12 @@ jobs:
           mkdir -p /tmp/src
           git clone --depth 1 https://github.com/openSUSE/libeconf.git /tmp/src/libeconf
           cd /tmp/src/libeconf
+          # libeconf's meson.build unconditionally adds -flto=auto (but not
+          # -ffat-lto-objects, which clang lacks), so afl-cc/clang emits pure
+          # LLVM-bitcode objects that the default linker rejects with
+          # "file format not recognized". Strip the LTO flag so afl-cc
+          # produces normal ELF objects that link cleanly.
+          sed -i "/'-flto=auto',/d" meson.build
           # Meson + Ninja build. Keep ASan + frame pointers; disable link-undef
           # checks and _FORTIFY_SOURCE so the AFL/ASan build links cleanly.
           meson setup build \
