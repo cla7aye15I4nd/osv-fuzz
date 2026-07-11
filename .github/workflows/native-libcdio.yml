@@ -47,7 +47,12 @@ jobs:
           NOCONFIGURE=1 ./autogen.sh || autoreconf -fi
           ./configure --enable-static --disable-shared \
             --disable-cxx --without-cd-paranoia --without-cdda-player
-          make -j"$(nproc)"
+          # Build the library first, then only the iso-read program. Building the
+          # top-level "all" target pulls in man-page (*.1) targets that have no
+          # rule in a git checkout (they ship only in release tarballs), which
+          # breaks the build. We only need the iso-read ASan binary to fuzz.
+          make -j"$(nproc)" -C lib
+          make -j"$(nproc)" -C src iso-read
           # Built CLI tools land in src/ (static => the src/ file is the real ASan binary).
           BIN="/tmp/src/libcdio/src/iso-read"
           if [ ! -x "$BIN" ]; then
