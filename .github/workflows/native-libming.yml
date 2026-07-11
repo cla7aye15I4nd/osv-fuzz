@@ -35,17 +35,31 @@ jobs:
       - name: Clone and build latest libming with AFL++ + ASan
         run: |
           set -e
+          # libming needs freetype headers (configure) plus bison+flex to
+          # generate the ActionScript parser/lexer in src/actioncompiler.
+          sudo apt-get install -y -qq bison flex libfreetype-dev 2>/dev/null || \
+            sudo apt-get install -y -qq bison flex libfreetype6-dev
           mkdir -p /tmp/src
           git clone --depth 1 https://github.com/libming/libming.git /tmp/src/libming
           cd /tmp/src/libming
           export CC=afl-cc
           export CXX=afl-c++
           export AFL_USE_ASAN=1
-          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
-          export CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          # -fcommon: libming's actioncompiler defines swf4debug/swf5debug in
+          # both the bison and flex outputs; clang/gcc default -fno-common turns
+          # those tentative definitions into "multiple definition" link errors.
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -fcommon"
+          export CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -fcommon"
           export LDFLAGS="-fsanitize=address"
           ./autogen.sh
           ./configure --disable-shared
+          # The actioncompiler Makefile has separate .tab.c and .tab.h rules that
+          # each run bison and both write swf<N>compiler.tab.c; under "make -j"
+          # they race and clobber it into a corrupt file. Generate the parser/
+          # lexer sources serially first, then build the rest in parallel.
+          make -C src/actioncompiler \
+            swf4compiler.tab.c swf4compiler.tab.h swf5compiler.tab.c swf5compiler.tab.h \
+            lex.swf4.c lex.swf5.c
           make -j"$(nproc)"
           BINDIR="$(pwd)/util"
           echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
