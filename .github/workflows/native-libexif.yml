@@ -41,6 +41,8 @@ jobs:
       - name: Clone and build latest libexif with AFL++ + ASan
         run: |
           set -eux
+          # libexif's autoreconf uses gettext, which needs autopoint.
+          sudo apt-get install -y -qq gettext autopoint
           # Build libexif (latest master) with AFL++ compilers + AddressSanitizer
           export CC=afl-cc
           export CXX=afl-c++
