@@ -39,6 +39,7 @@ jobs:
             git autoconf automake libtool pkg-config gettext autopoint \
             bison gperf make wget clang texinfo gtk-doc-tools \
             libgmp-dev nettle-dev libunistring-dev libidn2-dev \
+            libtasn1-6-dev \
             2>/dev/null || true
 
       - name: Clone and build gnutls with AFL++ + ASan
