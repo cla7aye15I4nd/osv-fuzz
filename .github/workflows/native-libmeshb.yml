@@ -53,7 +53,10 @@ jobs:
             -DCMAKE_C_FLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" \
             -DWITH_GMF_CTEST=OFF
-          cmake --build . -j"$(nproc)"
+          # Build only the C target we fuzz (and its Meshb.8 library dependency).
+          # Building all targets also compiles the Fortran examples, which link
+          # with gfortran and fail on the AFL-instrumented library's __afl_area_ptr.
+          cmake --build . --target mesh2poly -j"$(nproc)"
           # The vulnerable CLI (example program that calls GmfOpenMesh):
           BINDIR="$(pwd)/examples"
           BIN="$BINDIR/mesh2poly"
