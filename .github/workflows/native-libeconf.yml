@@ -62,6 +62,7 @@ jobs:
             --buildtype=debug \
             -Db_sanitize=address \
             -Db_lundef=false \
+            -Db_lto=false \
             -Dc_args="-g -O1 -fsanitize=address -fno-omit-frame-pointer -U_FORTIFY_SOURCE" \
             -Dc_link_args="-fsanitize=address"
           ninja -C build
