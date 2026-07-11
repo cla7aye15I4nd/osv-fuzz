@@ -37,9 +37,15 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             git autoconf automake libtool pkg-config gettext autopoint \
-            bison gperf make wget clang \
+            bison gperf make wget clang texinfo gtk-doc-tools \
             libgmp-dev nettle-dev libunistring-dev libidn2-dev \
+            libtasn1-6-dev \
             2>/dev/null || true
+          # asn1Parser (needed to regenerate lib/*_asn1_tab.c in a git build)
+          # ships in libtasn1-bin. Keep it on its own line so a name mismatch
+          # can't atomically abort the primary dependency install above.
+          sudo apt-get install -y -qq libtasn1-bin 2>/dev/null || true
+          command -v asn1Parser || echo "[!] asn1Parser still not on PATH"
 
       - name: Clone and build gnutls with AFL++ + ASan
         run: |
@@ -54,16 +60,27 @@ jobs:
           export SRC=/tmp/src/gnutls
           rm -rf "$SRC"
           mkdir -p /tmp/src
-          git clone --depth=1 https://github.com/gnutls/gnutls "$SRC"
+          # Pin to 3.8.10: the last release requiring nettle >= 3.6, which
+          # Ubuntu 24.04's nettle-dev (3.9.1) satisfies. gnutls 3.8.11+ bumped
+          # NETTLE_MINIMUM to 3.10, which is not packaged for this runner.
+          git clone --depth=1 --branch 3.8.10 https://github.com/gnutls/gnutls "$SRC"
           cd "$SRC"
 
-          # Build from git: fetch gnulib and generate ./configure
+          # bootstrap needs the gnulib submodule (provides gnulib-tool);
+          # a plain --depth=1 clone leaves it empty, so init it explicitly.
+          git submodule update --init --depth=1
+
+          # Build from git: fetch gnulib and generate ./configure.
+          # gtkdocize is required by bootstrap even with --disable-doc.
           ./bootstrap
 
           # --enable-fuzzer-target builds the fuzz/ targets; use bundled
           # libtasn1 + libunistring and drop p11-kit/docs to stay self-contained.
+          # --disable-full-test-suite: git builds default it on, which makes
+          # configure require libev4 (and other slow test-only deps) that we
+          # don't need for the fuzz targets or certtool.
           ./configure --enable-fuzzer-target --disable-doc \
-            --disable-hardware-acceleration \
+            --disable-hardware-acceleration --disable-full-test-suite \
             --without-p11-kit --with-included-libtasn1 --with-included-unistring \
             --disable-maintainer-mode
 
