@@ -50,7 +50,7 @@ jobs:
             XCFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer" \
             XLDFLAGS="-fsanitize=address" \
             XLIBS="-fsanitize=address" \
-            mutool
+            build/debug/mutool
           BINDIR="/tmp/src/mupdf/build/debug"
           BIN="$BINDIR/mutool"
           if [ ! -x "$BIN" ]; then
