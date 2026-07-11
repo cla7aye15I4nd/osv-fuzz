@@ -41,6 +41,12 @@ jobs:
       - name: Clone and build latest libidn2 with AFL++ + ASan
         run: |
           set -eux
+          # libidn2's ./bootstrap regenerates configure and needs extra tools
+          # (gperf + gengetopt at minimum; gettext/autopoint, bison, help2man
+          # and gtk-doc-tools are also required by its bootstrap.conf).
+          sudo apt-get install -y -qq \
+            gperf gengetopt gettext autopoint bison help2man gtk-doc-tools texinfo
+
           # Build libidn2 (latest master) with AFL++ compilers + AddressSanitizer.
           export CC=afl-cc
           export CXX=afl-c++
