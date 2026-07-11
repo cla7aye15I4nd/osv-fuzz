@@ -54,7 +54,21 @@ jobs:
           export AFL_USE_ASAN=1
           cd /tmp/src/libcue
           mkdir -p build && cd build
-          LIB_FUZZING_ENGINE="" \
+          # afl-cc defines FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION, which
+          # strips the built-in main() from oss-fuzz/fuzz.cpp, so a fuzzing
+          # engine must supply main(). Use AFL++'s persistent-mode driver: it
+          # provides a main() that both replays file arguments (dry-run) and
+          # feeds test cases under afl-fuzz @@.
+          AFL_DRIVER="$(ls /usr/lib/afl/libAFLDriver.a /usr/lib/libAFLDriver.a 2>/dev/null | head -1)"
+          if [ -z "$AFL_DRIVER" ]; then
+            AFL_DRIVER="$(find / -name 'libAFLDriver.a' 2>/dev/null | head -1)"
+          fi
+          if [ -z "$AFL_DRIVER" ]; then
+            echo "[!] Could not locate libAFLDriver.a"
+            exit 1
+          fi
+          echo "[+] Using AFL++ fuzzing driver: $AFL_DRIVER"
+          LIB_FUZZING_ENGINE="$AFL_DRIVER" \
           cmake -DBUILD_FUZZER=ON \
                 -DCMAKE_BUILD_TYPE=Debug \
                 -DCMAKE_C_COMPILER=afl-cc \
