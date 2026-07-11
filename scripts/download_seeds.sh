@@ -1,47 +1,31 @@
 #!/bin/bash
-set -euo pipefail
+# Download a project's PoC seeds from R2 (seeds/<project>/<id>.bin) via the S3 API.
+#
+# Uses `aws s3 sync` against R2's S3 endpoint — one bulk, parallel transfer that
+# scales to hundreds of concurrent CI jobs (unlike the Cloudflare REST API, which
+# rate-limits the whole account). Credentials come from the environment:
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  (R2 S3 token, from repo secrets)
+#   R2_S3_ENDPOINT (optional; defaults to this account's endpoint)
+set -uo pipefail
 
-PROJECT="${1:?Usage: download_seeds.sh <project>}"
+PROJECT="${1:?Usage: download_seeds.sh <project> [dest]}"
 DEST="${2:-seeds/${PROJECT}}"
 BUCKET="${R2_BUCKET:-osv-fuzz-seeds}"
-ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-}"
-API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
+ENDPOINT="${R2_S3_ENDPOINT:-https://168a3590e273619898344706b02f2311.r2.cloudflarestorage.com}"
 
 mkdir -p "$DEST"
 
-if [ -z "$API_TOKEN" ] || [ -z "$ACCOUNT_ID" ]; then
-    echo "[!] CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID not set — skipping seed download"
+if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+    echo "[!] R2 S3 credentials not set (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY) — skipping seed download"
     echo "[+] Downloaded 0 seeds to $DEST"
     exit 0
 fi
 
-echo "[+] Downloading seeds for $PROJECT from R2..."
+echo "[+] Syncing seeds for $PROJECT from R2 (s3://$BUCKET/seeds/$PROJECT/)..."
+AWS_EC2_METADATA_DISABLED=true \
+aws s3 sync "s3://${BUCKET}/seeds/${PROJECT}/" "$DEST/" \
+    --endpoint-url "$ENDPOINT" --region auto --only-show-errors || {
+    echo "[!] aws s3 sync failed"; }
 
-# Use Cloudflare API to list objects and download via S3-compatible endpoint
-seed_count=0
-
-# List all seed files for this project
-objects=$(curl -sf -H "Authorization: Bearer $API_TOKEN" \
-    "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/r2/buckets/$BUCKET/objects?prefix=seeds/${PROJECT}/&limit=1000" 2>/dev/null) || {
-    echo "[!] Failed to list seeds from R2 — check API token permissions"
-    echo "[+] Downloaded 0 seeds to $DEST"
-    exit 0
-}
-
-# Download each .bin file
-for key in $(echo "$objects" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-for obj in data.get('result', []):
-    k = obj['key']
-    if k.endswith('.bin'):
-        print(k)
-" 2>/dev/null); do
-    filename=$(basename "$key")
-    # Use wrangler to download (handles auth properly)
-    if npx wrangler r2 object get "$BUCKET/$key" --remote --file "$DEST/$filename" 2>/dev/null; then
-        seed_count=$((seed_count + 1))
-    fi
-done
-
-echo "[+] Downloaded $seed_count seeds to $DEST"
+count=$(find "$DEST" -name '*.bin' -type f 2>/dev/null | wc -l)
+echo "[+] Downloaded $count seeds to $DEST"
