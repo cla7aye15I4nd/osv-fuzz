@@ -50,7 +50,8 @@ jobs:
         run: |
           git clone --depth 1 --filter=blob:none --sparse https://github.com/google/oss-fuzz /tmp/oss-fuzz
           cd /tmp/oss-fuzz && git sparse-checkout set projects/upx
-          cp -r /tmp/oss-fuzz/projects/upx/* /tmp/src/
+          # Match the oss-fuzz Dockerfile layout: fuzzers + build.patch live under $SRC/upx/fuzzers/
+          cp -r /tmp/oss-fuzz/projects/upx/fuzzers /tmp/src/upx/
 
       - name: Build fuzz targets with AFL++
         run: |
