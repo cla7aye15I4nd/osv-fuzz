@@ -42,6 +42,7 @@ jobs:
             autoconf \
             automake \
             libtool \
+            libtool-bin \
             unzip
 
       - name: Clone and build latest flac with AFL++ + ASan
