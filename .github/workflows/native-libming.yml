@@ -35,7 +35,10 @@ jobs:
       - name: Clone and build latest libming with AFL++ + ASan
         run: |
           set -e
-          sudo apt-get install -y -qq libfreetype-dev libfreetype6-dev 2>/dev/null || sudo apt-get install -y -qq libfreetype6-dev
+          # libming needs freetype headers (configure) plus bison+flex to
+          # generate the ActionScript parser/lexer in src/actioncompiler.
+          sudo apt-get install -y -qq bison flex libfreetype-dev 2>/dev/null || \
+            sudo apt-get install -y -qq bison flex libfreetype6-dev
           mkdir -p /tmp/src
           git clone --depth 1 https://github.com/libming/libming.git /tmp/src/libming
           cd /tmp/src/libming
