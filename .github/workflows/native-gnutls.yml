@@ -41,6 +41,11 @@ jobs:
             libgmp-dev nettle-dev libunistring-dev libidn2-dev \
             libtasn1-6-dev \
             2>/dev/null || true
+          # asn1Parser (needed to regenerate lib/*_asn1_tab.c in a git build)
+          # ships in libtasn1-bin. Keep it on its own line so a name mismatch
+          # can't atomically abort the primary dependency install above.
+          sudo apt-get install -y -qq libtasn1-bin 2>/dev/null || true
+          command -v asn1Parser || echo "[!] asn1Parser still not on PATH"
 
       - name: Clone and build gnutls with AFL++ + ASan
         run: |
