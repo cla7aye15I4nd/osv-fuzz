@@ -41,6 +41,11 @@ jobs:
       - name: Clone and build latest libsndfile with AFL++ + ASan
         run: |
           set -e
+          # libsndfile generates src/test_endswap.c (a BUILT_SOURCES entry) from
+          # .tpl/.def files via GNU AutoGen. Without the `autogen` binary, configure
+          # sets HAVE_AUTOGEN=no and the generation rule is dropped, so `make` fails
+          # with "No rule to make target 'src/test_endswap.c'". Install it first.
+          sudo apt-get install -y autogen
           mkdir -p /tmp/src
           git clone --depth 1 https://github.com/libsndfile/libsndfile.git /tmp/src/libsndfile
           cd /tmp/src/libsndfile
