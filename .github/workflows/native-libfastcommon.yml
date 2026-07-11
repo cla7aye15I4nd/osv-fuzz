@@ -54,8 +54,18 @@ jobs:
           export CC=afl-cc
           export CXX=afl-c++
           export AFL_USE_ASAN=1
-          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer"
+          # -D_GNU_SOURCE / -D_FILE_OFFSET_BITS=64 mirror upstream's own build
+          # flags (see src/Makefile.in); base64.c -> common_define.h needs them
+          # for fallocate() and 64-bit off_t.
+          export CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE"
           cd /tmp/src/libfastcommon
+
+          # Run upstream make.sh once so it generates src/_os_define.h (platform
+          # macros: OS_LINUX, OS_BITS, dirent fields...) that common_define.h
+          # #includes. We discard its gcc-built objects and recompile the whole
+          # library ourselves below with afl-cc + ASan so the instrumentation
+          # actually covers the vulnerable code.
+          ./make.sh
 
           # libfastcommon is a LIBRARY (no CLI programs); the vulnerable function
           # base64_decode_auto (src/base64.c) is only reachable via an API-level
@@ -101,9 +111,14 @@ jobs:
           }
           EOF
 
-          # Compile the vulnerable TU with ASan, then link the harness against it.
-          $CC $CFLAGS -I src -c src/base64.c -o base64.o
-          $CC $CFLAGS -I src fuzz_base64_decode.c base64.o -o poc_runner
+          # base64.c pulls in the rest of libfastcommon (logError, g_oom_notify,
+          # fc_malloc, ...), so compile every library TU with ASan and link the
+          # harness against all of them. fuzz_base64_decode.c lives in the repo
+          # root (not src/), so the src/*.c glob never picks up its main().
+          for f in src/*.c; do
+            $CC $CFLAGS -I src -c "$f" -o "${f%.c}.o"
+          done
+          $CC $CFLAGS -I src fuzz_base64_decode.c src/*.o -o poc_runner -lpthread -lm -ldl
 
           BIN="/tmp/src/libfastcommon/poc_runner"
           if [ ! -x "$BIN" ]; then
